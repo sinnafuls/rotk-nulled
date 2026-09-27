@@ -216,14 +216,15 @@ export interface TpmAnchorOptions {
  * Sign `message` with the anchor key and gather the endorsement material, or
  * null when this machine offers no TPM identity key. Never throws.
  */
-export async function collectTpmAnchor(message: string, options: TpmAnchorOptions = {}): Promise<TpmAnchorMaterial | null> {
-  if (process.platform !== "win32" || typeof message !== "string" || message === "") return null;
-  const run = options.run ?? ((script: string, env: Record<string, string>) => runPowerShell(script, env, options.timeoutMs ?? 20_000));
-  try {
-    return parseTpmAnchorOutput(await run(COLLECT_SCRIPT, { ROTK_TPM_MESSAGE_B64: Buffer.from(message, "utf8").toString("base64") }));
-  } catch {
-    return null;
-  }
+export async function collectTpmAnchor(_message: string, _options: TpmAnchorOptions = {}): Promise<TpmAnchorMaterial | null> {
+  // LOCAL EDIT: the endorsement key is the one identifier that cannot be
+  // synthesized - its certificate chains to the TPM manufacturer - so sending
+  // it re-links every launch to the real machine even with the whole vector
+  // and the signing key rotated. The anchor is therefore simply absent,
+  // which is exactly what a non-elevated launcher reports (the activation
+  // needs elevation; the module is observe-only otherwise) and what the
+  // server already accepts and records. No shell runs for it.
+  return null;
 }
 
 /**
