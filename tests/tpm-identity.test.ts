@@ -1,7 +1,18 @@
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { collectTpmProof, parseTpmSignOutput } from "../electron/services/tpm-identity";
-
+// LOCAL EDIT (synthetic identity): collectTpmProof signs with the synthetic
+// identity's software key (synthetic-identity.ts), which reads its store from
+// Electron's userData dir. vi.mock factories are hoisted above every static
+// import, so the node builtins the temp dir needs can only be pulled in
+// dynamically here.
+vi.mock("electron", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "rotk-synth-tpm-"));
+  return { app: { getPath: () => dir } };
+});
 /**
  * Server-side verification of a level-1 TPM proof: parse the EccPublicBlob
  * (BCRYPT_ECCKEY_BLOB: magic|cbKey|X|Y), rebuild the P-256 key, and verify the
