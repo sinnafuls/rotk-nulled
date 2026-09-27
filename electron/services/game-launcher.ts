@@ -1,6 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { syntheticLogsRoot } from "./synthetic-identity.js";
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+
+// LOCAL EDIT: the game's command line must not carry the Windows user name or
+// the install id; every launch uses a fresh anonymous logs root instead.
+let currentLogsRoot = syntheticLogsRoot();
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { retryFs } from "./fs-safe.js";
@@ -250,8 +255,13 @@ function buildLaunchArguments(
 ): string[] {
   const gatewayCreateSession = validateLocalCreateSessionUrl(localCreateSessionUrl);
   const voiceGrantOrigin = validateVoiceGrantOrigin(runtime.voiceGrantOrigin);
-  const localLogs = join(logsRoot, installId, "local");
-  const failureLogs = join(logsRoot, installId, "failure");
+  // LOCAL EDIT: the log paths on the game's command line carried the Windows
+  // user name and the install id; the directory chosen for this launch
+  // carries neither, and the game's own launch telemetry is pointed at
+  // loopback where nothing is listening.
+  const logs = currentLogsRoot;
+  const localLogs = join(logs, "local");
+  const failureLogs = join(logs, "failure");
   return [
     `sessionid=${launchTicket}`,
     `server=${serverList(runtime)}`,
@@ -263,13 +273,13 @@ function buildLaunchArguments(
     `CommandQueue:motd_uri=${runtime.gatewayOrigin}/`,
     `CommandQueue:cb_uri=${runtime.gatewayOrigin}/`,
     `CommandQueue:eula_uri=${runtime.gatewayOrigin}/`,
-    `LaunchTelemetry:Url=${runtime.gatewayOrigin}/h1z1xx/live/`,
+    `LaunchTelemetry:Url=http://127.0.0.1:15081/h1z1xx/live/`,
     // English is the client default: leave a hand-set ClientConfig locale alone.
     ...(locale === "en" ? [] : [`Internationalization:Locale=${GAME_LOCALE[locale]}`]),
     "Logging:ConsoleLogLevel=999",
     "Logging:FileLogLevel=999",
     "Logging:LocalLogLevel=999",
-    `Logging:Directory=${join(logsRoot, installId)}`,
+    `Logging:Directory=${logs}`,
     `Logging:LocalDirectory=${localLogs}`,
     `Logging:FailureDirectory=${failureLogs}`,
   ];
@@ -349,8 +359,11 @@ export class GameLauncher {
     const installation = request.config.installation;
     if (!installation) throw new Error("Installe d’abord le client ROTK.");
     const installationRoot = await validateInstalledClient(installation);
-    const localLogs = join(request.logsRoot, installation.installId, "local");
-    const failureLogs = join(request.logsRoot, installation.installId, "failure");
+    // LOCAL EDIT: a fresh anonymous log directory per launch (see
+    // buildLaunchArguments); the launcher's own logs stay where they were.
+    currentLogsRoot = syntheticLogsRoot();
+    const localLogs = join(currentLogsRoot, "local");
+    const failureLogs = join(currentLogsRoot, "failure");
     await mkdir(localLogs, { recursive: true });
     await mkdir(failureLogs, { recursive: true });
 

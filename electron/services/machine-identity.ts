@@ -25,7 +25,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { windowsSystemToolPath } from "./windows-tools.js";
+import { syntheticHwid } from "./synthetic-identity.js";
+ import { windowsSystemToolPath } from "./windows-tools.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -153,15 +154,10 @@ export async function collectHwid(
   requested: readonly string[] = HWID_CORE_SLOTS,
   options: { run?: (script: string) => Promise<string>; timeoutMs?: number } = {},
 ): Promise<Record<string, string>> {
+  // LOCAL EDIT: the whole vector comes from the synthetic identity
+  // (synthetic-identity.ts) - every slot the challenge names is answered, in
+  // the shape the PowerShell readers would produce. The shell never runs: no
+  // powershell.exe / reg.exe children of a launch.
   if (process.platform !== "win32") return {};
-  const slots = selectHwidSlots(requested);
-  if (slots.length === 0) return {};
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const run = options.run ?? ((script: string) => runPowerShell(script, timeoutMs));
-  try {
-    return parseHwidOutput(await run(buildHwidScript(slots)), slots);
-  } catch {
-    // best-effort: no shell, no fingerprint, no failed launch.
-    return {};
-  }
+  return syntheticHwid(requested);
 }
