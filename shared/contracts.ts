@@ -161,6 +161,25 @@ export interface DebugSessionSummary {
   error: string | null;
 }
 
+// LOCAL EDIT (diagnostic): the one-click network check shown in the footer.
+export type NetworkCheckOutcome = "ok" | "warn" | "fail";
+
+export interface NetworkCheckEntry {
+  id: string;
+  label: string;
+  target: string;
+  outcome: NetworkCheckOutcome;
+  detail: string;
+  ms: number | null;
+}
+
+export interface NetworkCheckReport {
+  at: string;
+  environment: string;
+  failed: number;
+  entries: NetworkCheckEntry[];
+}
+
 export interface OperationResult<T = undefined> {
   ok: boolean;
   value?: T;
@@ -188,6 +207,9 @@ export interface RotkLauncherApi {
   selectSource(): Promise<OperationResult<{ sourceRoot: string }>>;
   selectDestination(): Promise<OperationResult<{ destinationRoot: string }>>;
   install(): Promise<OperationResult<{ installationRoot: string }>>;
+  /** LOCAL EDIT (diagnostic): probes DNS, the HTTPS API, the gateway and the
+   *  UDP login ports of the selected environment. Never blocks Play. */
+  networkCheck(): Promise<OperationResult<NetworkCheckReport>>;
   cancelInstall(): Promise<void>;
   play(): Promise<OperationResult<{ pid: number }>>;
   /** Opens a ROTK site path; `serverId` picks which site, defaulting to the selected one. */
@@ -224,6 +246,7 @@ export const IPC_CHANNELS = {
   install: "launcher:install",
   cancelInstall: "launcher:cancel-install",
   play: "launcher:play",
+  networkCheck: "launcher:network-check",
   openWebsite: "launcher:open-website",
   checkLauncherUpdate: "launcher:update-check",
   downloadLauncherUpdate: "launcher:update-download",

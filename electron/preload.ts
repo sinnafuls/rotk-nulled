@@ -30,6 +30,7 @@ const api: RotkLauncherApi = {
   install: () => ipcRenderer.invoke(IPC_CHANNELS.install),
   cancelInstall: () => ipcRenderer.invoke(IPC_CHANNELS.cancelInstall),
   play: () => ipcRenderer.invoke(IPC_CHANNELS.play),
+  networkCheck: () => ipcRenderer.invoke(IPC_CHANNELS.networkCheck),
   openWebsite: (path, serverId) => ipcRenderer.invoke(IPC_CHANNELS.openWebsite, path, serverId),
   checkLauncherUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.checkLauncherUpdate),
   downloadLauncherUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.downloadLauncherUpdate),

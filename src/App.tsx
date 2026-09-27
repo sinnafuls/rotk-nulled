@@ -8,6 +8,7 @@ import { PlayerIdentityPanel } from "./components/PlayerIdentityPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { WindowChrome } from "./components/WindowChrome";
 import { useI18n } from "./i18n";
+import { NetworkCheckPanel } from "./components/NetworkCheckPanel";
 
 export default function App() {
   const { locale, copy } = useI18n();
@@ -15,6 +16,7 @@ export default function App() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [identityOpen, setIdentityOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [networkOpen, setNetworkOpen] = useState(false);
   const [transientError, setTransientError] = useState<string | null>(null);
   const [detectAttempted, setDetectAttempted] = useState(false);
   const [debugSessionBusy, setDebugSessionBusy] = useState(false);
@@ -142,14 +144,25 @@ export default function App() {
         onPrimary={onPrimary}
         onSetup={() => {
           setIdentityOpen(false);
+          setNetworkOpen(false);
           setSetupOpen(true);
+        }}
+        onNetworkCheck={() => {
+          setSetupOpen(false);
+          setIdentityOpen(false);
+          setNetworkOpen(true);
         }}
         onIdentity={() => {
           setSetupOpen(false);
+          setNetworkOpen(false);
           setIdentityOpen(true);
         }}
         onSelectLaunchProfile={(serverId, role) =>
           void perform(() => window.rotk.setLaunchProfile(serverId, role))}
+      />
+      <NetworkCheckPanel
+        open={networkOpen}
+        onClose={() => setNetworkOpen(false)}
       />
       <PlayerIdentityPanel
         snapshot={snapshot}

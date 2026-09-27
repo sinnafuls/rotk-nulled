@@ -1,4 +1,4 @@
-import { CircleAlert, KeyRound, Play, RotateCcw, Settings2 } from "lucide-react";
+import { CircleAlert, KeyRound, Play, RotateCcw, Settings2, Wifi } from "lucide-react";
 import type { LauncherSnapshot } from "../../shared/contracts";
 import type { PlayerRole, ServerId } from "../../shared/launch-profile";
 import { useI18n, type Copy } from "../i18n";
@@ -9,6 +9,7 @@ interface LauncherFooterProps {
   busy: boolean;
   onPrimary(): void;
   onSetup(): void;
+  onNetworkCheck(): void;
   onIdentity(): void;
   onSelectLaunchProfile(serverId: ServerId, role: PlayerRole): void;
 }
@@ -67,6 +68,7 @@ export function LauncherFooter({
   busy,
   onPrimary,
   onSetup,
+  onNetworkCheck,
   onIdentity,
   onSelectLaunchProfile,
 }: LauncherFooterProps) {
@@ -103,6 +105,9 @@ export function LauncherFooter({
       />
 
       <div className="footer-tools">
+        <button type="button" onClick={onNetworkCheck} aria-label={copy.network.title} title={copy.network.button}>
+          <Wifi size={19} />
+        </button>
         <button type="button" onClick={onIdentity} disabled={installing} aria-label={copy.footer.playerIdentity} title={copy.footer.playerIdentity}>
           <KeyRound size={19} />
         </button>

@@ -76,6 +76,18 @@ export interface Copy {
     playersUnavailable: string;
     playersUnknown: string;
   };
+  network: {
+    title: string;
+    button: string;
+    run: string;
+    running: string;
+    close: string;
+    ok: string;
+    warn: string;
+    fail: string;
+    failedCount: string;
+    allGood: string;
+  };
   identity: {
     panelLabel: string;
     eyebrow: string;
@@ -242,6 +254,18 @@ const COPY: Record<AppLocale, Copy> = {
       playersInGame: "IN GAME",
       playersUnavailable: "—",
       playersUnknown: "Player count unavailable",
+    },
+    network: {
+      title: "Network check",
+      button: "Check the network path to the selected server (VPN diagnostics)",
+      run: "Run checks",
+      running: "Probing…",
+      close: "Close",
+      ok: "OK",
+      warn: "NO ANSWER",
+      fail: "FAILED",
+      failedCount: "failed — see the red rows; on a VPN this is the leg your exit blocks",
+      allGood: "every leg reachable from this machine",
     },
     identity: {
       panelLabel: "ROTK account authentication",
@@ -439,6 +463,18 @@ const COPY: Record<AppLocale, Copy> = {
       playersInGame: "EN JEU",
       playersUnavailable: "—",
       playersUnknown: "Nombre de joueurs indisponible",
+    },
+    network: {
+      title: "Test réseau",
+      button: "Vérifier le chemin réseau vers le serveur choisi (diagnostic VPN)",
+      run: "Lancer les tests",
+      running: "Test en cours…",
+      close: "Fermer",
+      ok: "OK",
+      warn: "PAS DE RÉPONSE",
+      fail: "ÉCHEC",
+      failedCount: "échoué — voir les lignes rouges ; sous VPN, c'est l'étape bloquée par la sortie",
+      allGood: "toutes les étapes sont joignables depuis cette machine",
     },
     identity: {
       panelLabel: "Authentification du compte ROTK",
