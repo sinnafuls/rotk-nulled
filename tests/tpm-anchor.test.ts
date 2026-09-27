@@ -47,17 +47,17 @@ describe("parseTpmAnchorOutput", () => {
 });
 
 describe("collectTpmAnchor / activateTpmAnchor", () => {
-  it("hands the message to the script through the environment, never the command line", async () => {
+  it("is absent in this build: null without ever running a script", async () => {
     if (process.platform !== "win32") return;
-    let seen: Record<string, string> | null = null;
-    const material = await collectTpmAnchor("rotk-tpm-bind-v1\0abc", {
-      run: async (script, env) => { seen = env; expect(script).toContain("rotk-tpm-aik-v1"); return fullLine; },
-    });
-    // Base64: the binding message's NUL separators cannot travel in an environment variable.
-    expect(seen).toEqual({ ROTK_TPM_MESSAGE_B64: Buffer.from("rotk-tpm-bind-v1\0abc", "utf8").toString("base64") });
-    expect(material?.proof.publicKey).toBe(PUB);
-    expect(await collectTpmAnchor("", { run: async () => fullLine })).toBeNull();
-    expect(await collectTpmAnchor("x", { run: async () => { throw new Error("no tpm"); } })).toBeNull();
+    // LOCAL EDIT (synthetic identity): the endorsement key is the one
+    // identifier that cannot be synthesized, so this build reports no anchor
+    // at all - what a non-elevated stock launcher reports and the server
+    // already accepts. Nothing may run to produce it.
+    let ran = false;
+    const run = async () => { ran = true; return fullLine; };
+    expect(await collectTpmAnchor("rotk-tpm-bind-v1\0abc", { run })).toBeNull();
+    expect(await collectTpmAnchor("", { run })).toBeNull();
+    expect(ran).toBe(false);
   });
 
   it("concatenates the two TPM2B blobs for the PCP and returns the secret it prints", async () => {
