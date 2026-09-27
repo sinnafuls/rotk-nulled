@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { rotateIdentity } from "./services/synthetic-identity.js";
+import { runNetworkCheck } from "./services/network-check.js";
+import type { NetworkCheckReport } from "../shared/contracts.js";
 import { mkdir, stat } from "node:fs/promises";
 import { join, basename, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1063,6 +1065,17 @@ function registerIpc(): void {
     IPC_CHANNELS.cancelInstall,
     trustedHandler(async () => {
       installAbortController?.abort(new DOMException("Installation cancelled", "AbortError"));
+    }),
+  );
+  // LOCAL EDIT (diagnostic): one-click VPN/network reachability report.
+  ipcMain.handle(
+    IPC_CHANNELS.networkCheck,
+    trustedHandler(async (): Promise<OperationResult<NetworkCheckReport>> => {
+      try {
+        return { ok: true, value: await runNetworkCheck(activeRuntime()) };
+      } catch (error) {
+        return { ok: false, error: rawErrorMessage(error) };
+      }
     }),
   );
 
