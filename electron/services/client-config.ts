@@ -88,7 +88,8 @@ export function synchronizeClientConfig(
     {
       section: "LaunchTelemetry",
       key: "Url",
-      value: `${runtime.gatewayOrigin}/h1z1xx/live/`,
+      // LOCAL EDIT: launch telemetry pointed at loopback (nothing listens).
+      value: "http://127.0.0.1:15081/h1z1xx/live/",
     },
   ];
   for (const directive of directives) synchronized = upsertIniDirective(synchronized, directive);

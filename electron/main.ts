@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { rotateIdentity } from "./services/synthetic-identity.js";
 import { mkdir, stat } from "node:fs/promises";
 import { join, basename, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,6 +121,15 @@ if (!app.isPackaged && process.env.ROTK_USER_DATA_DIR) {
   // names and installation directories. Electron's implicit directory is
   // product-name based, which made development and packaged builds drift.
   app.setPath("userData", join(app.getPath("appData"), APP_NAME));
+}
+// LOCAL EDIT: electron-updater's staging id is a UUID it derives from the real
+// machine id the first time it is missing, and then keeps forever - a stable
+// identifier sent with every update check. Overwrite it with a random one on
+// every start (deleting it would only regenerate the derived value).
+try {
+  writeFileSync(join(app.getPath("userData"), ".updaterId"), randomUUID(), "utf8");
+} catch {
+  // A read-only user-data directory is not a reason to refuse to start.
 }
 // Breadcrumbs from here to the first paint, in %APPDATA%\ROTK Launcher\startup.log.
 const startupLog = new StartupLog(app.getPath("userData"));
@@ -1018,6 +1029,9 @@ function registerIpc(): void {
       const launchCredential = identityFromPlayerKey(selectedKey);
       const launchRuntime = activeRuntime();
       phase = "launching";
+      // LOCAL EDIT: one synthetic machine identity per Play click - the HWID
+      // vector and the signing key are both replaced before attestation runs.
+      rotateIdentity();
       lastErrorRaw = null;
       await broadcastSnapshot();
       // A discovered update must be fully downloaded and installed before
@@ -1327,9 +1341,12 @@ async function initialize(): Promise<void> {
   }
   startupLog.mark("installation-checked", `phase=${phase}`);
   launcherUpdate = new LauncherUpdateService({
-    // In development there is no installed package to update against;
-    // the updater stays inert and the snapshot reports "idle".
-    updater: app.isPackaged ? electronUpdater.autoUpdater : null,
+    // LOCAL EDIT: this is a patched build; an official update would replace
+    // it with the unpatched launcher. The updater is therefore inert here,
+    // exactly as it already is in development: the check reports "idle" and
+    // nothing is ever downloaded or installed. Re-enable by restoring the
+    // `app.isPackaged ? electronUpdater.autoUpdater : null` below.
+    updater: null,
     onChange: () => void broadcastSnapshot(),
   });
   diagnostics = new DiagnosticController({ directory: join(app.getPath("userData"), "diagnostics"),
