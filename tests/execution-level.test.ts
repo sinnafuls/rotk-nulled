@@ -24,7 +24,8 @@ interface PackageManifest {
 it("keeps the shared executable compatible with restricted Chromium children", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as PackageManifest;
   expect(manifest.build.win.requestedExecutionLevel).toBe("asInvoker");
-  // The per-machine install stays: one copy under Program Files, updated by
-  // the assisted installer that asks for elevation itself.
-  expect(manifest.build.nsis.perMachine).toBe(true);
+  // LOCAL EDIT: this build installs per-user (LocalAppData\Programs) so the
+  // installer never needs elevation at all; the stock per-machine install is
+  // what upstream's release decision pins.
+  expect(manifest.build.nsis.perMachine).toBe(false);
 });
