@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   HWID_CORE_SLOTS,
   HWID_KNOWN_SLOTS,
@@ -58,37 +58,47 @@ describe("slot selection and script", () => {
   });
 });
 
+// LOCAL EDIT (synthetic identity): collectHwid answers from the synthetic
+// identity (synthetic-identity.ts) instead of running a PowerShell script, so
+// these tests pin the new contract: every requested KNOWN slot is answered
+// (values generated, shapes asserted), unknown slots are dropped, nothing is
+// ever shelled out to, and collection never throws. The parsing/selection
+// tests above keep covering the stock helpers the module still carries.
+// vi.mock factories are hoisted above every static import, so the node
+// builtins the temp dir needs can only be pulled in dynamically here.
+ vi.mock("electron", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "rotk-synth-mi-"));
+  return { app: { getPath: () => dir } };
+});
+
 describe("collectHwid", () => {
-  it("runs the script for the requested known slots and returns the cleaned vector", async () => {
+  it("answers exactly the requested known slots and never runs a script", async () => {
     if (process.platform !== "win32") return; // gated on win32; collector is a no-op elsewhere
-    const scripts: string[] = [];
+    let ran = false;
     const vector = await collectHwid(["machine_guid", "bios_serial", "unknown_slot"], {
-      run: async (script) => {
-        scripts.push(script);
-        return JSON.stringify({ machine_guid: "MG-1", bios_serial: "BIOS-2", volume_serial: "not asked" });
-      },
+      run: async () => { ran = true; return "{}"; },
     });
-    expect(scripts).toHaveLength(1);
-    expect(scripts[0]).toContain("$r['bios_serial']");
-    expect(scripts[0]).not.toContain("unknown_slot");
-    // A slot the script happens to print but nobody asked for is not answered.
-    expect(vector).toEqual({ machine_guid: "mg-1", bios_serial: "bios-2" });
+    expect(ran).toBe(false); // the shell never runs: no powershell.exe / reg.exe child
+    expect(Object.keys(vector).sort()).toEqual(["bios_serial", "machine_guid"]);
+    expect(vector.machine_guid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(vector.bios_serial).toMatch(/^[0-9a-f]{8}$/);
   });
 
   it("defaults to the core five", async () => {
     if (process.platform !== "win32") return;
-    let script = "";
-    await collectHwid(undefined, { run: async (s) => { script = s; return "{}"; } });
-    for (const slot of HWID_CORE_SLOTS) expect(script).toContain(`$r['${slot}']`);
-    expect(script).not.toContain("bios_serial");
+    const vector = await collectHwid(undefined, { run: async () => { throw new Error("must not run"); } });
+    expect(Object.keys(vector).sort()).toEqual([...HWID_CORE_SLOTS].sort());
   });
 
-  it("asks nothing when no requested slot is known, and never throws", async () => {
+  it("answers nothing when no requested slot is known, and never throws", async () => {
     if (process.platform !== "win32") return;
-    let ran = false;
-    expect(await collectHwid(["nope"], { run: async () => { ran = true; return "{}"; } })).toEqual({});
-    expect(ran).toBe(false);
-    expect(await collectHwid(["machine_guid"], { run: async () => { throw new Error("wmi failed"); } })).toEqual({});
+    expect(await collectHwid(["nope"], { run: async () => { throw new Error("must not run"); } })).toEqual({});
+    // A slot the vector does not know is simply not answered - same as a stock
+    // launcher missing a WMI class - and that is not an error.
+    expect(await collectHwid(["machine_guid"])).toEqual({ machine_guid: expect.any(String) });
   });
 
   it("returns an empty vector off Windows", async () => {
