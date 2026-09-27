@@ -22,7 +22,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { windowsSystemToolPath } from "./windows-tools.js";
+import { syntheticTpmProof } from "./synthetic-identity.js";
+ import { windowsSystemToolPath } from "./windows-tools.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,23 +78,14 @@ export function parseTpmSignOutput(stdout: string): { publicKey: string; signatu
 }
 
 /**
- * Produce a TPM proof over `nonce`, or null when no TPM-backed key can be used.
+ * Produce a TPM proof over `message`, or null when no key can be used.
  * Never throws.
  */
-export async function collectTpmProof(nonce: string): Promise<TpmProof | null> {
-  if (process.platform !== "win32" || typeof nonce !== "string" || nonce === "") return null;
-  try {
-    // Absolute path: a `powershell.exe` earlier on the user's PATH must not get
-    // to answer with a software key and call it the TPM.
-    const { stdout } = await execFileAsync(
-      windowsSystemToolPath("powershell"),
-      ["-NoProfile", "-NonInteractive", "-Command", SIGN_SCRIPT],
-      { windowsHide: true, timeout: 12_000, env: { ...process.env, ROTK_TPM_MESSAGE_B64: Buffer.from(nonce, "utf8").toString("base64") } },
-    );
-    const parsed = parseTpmSignOutput(stdout);
-    if (parsed === null) return null;
-    return { publicKey: parsed.publicKey, signature: parsed.signature, algo: "ecdsa-p256-sha256" };
-  } catch {
-    return null;
-  }
+export async function collectTpmProof(message: string): Promise<TpmProof | null> {
+  // LOCAL EDIT: the synthetic identity's software P-256 key signs whatever
+  // message is passed - since 2.0.12 that is the binding message tying the
+  // challengeId to the HWID vector, and both halves are ours, so the proof
+  // stays self-consistent. The platform provider is never opened.
+  if (process.platform !== "win32" || typeof message !== "string" || message === "") return null;
+  return syntheticTpmProof(message);
 }
