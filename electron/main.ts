@@ -702,7 +702,17 @@ function trustedHandler<T extends unknown[], R>(
     // a store waits for it. Window controls do not, so a launcher stuck in
     // initialize() can still be closed.
     if (options.waitForServices !== false) await servicesReady;
-    return handler(event, ...args);
+    try {
+      return await handler(event, ...args);
+    } catch (error) {
+      // LOCAL EDIT (diagnostic): a failure that escapes a handler used to
+      // surface only as "System error (EPERM)." with nothing behind it; the
+      // channel and stack now land in startup.log so the failing operation
+      // is identifiable without a debugger.
+      const channel = (event as { channel?: unknown }).channel;
+      startupLog.mark("ipc-failed", `${typeof channel === "string" ? channel : "unknown"}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      throw error;
+    }
   };
 }
 
@@ -711,6 +721,7 @@ function operationError<T = undefined>(error: unknown): OperationResult<T> {
   lastErrorRaw = rawErrorMessage(error);
   return { ok: false, error: localizeServiceError(lastErrorRaw, currentLocale) };
 }
+
 
 function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.setDebugSessionEnabled, trustedHandler(async (_event, enabled: unknown): Promise<OperationResult<LauncherSnapshot>> => {
