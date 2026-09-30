@@ -8,8 +8,14 @@ export const VIVOX_STOCK_V4_SHA256 =
   "d6915a466a905ae55f7e20019e01228c92cc86ce793a9fc050b49258a210c7b1";
 export const VIVOX_STOCK_V5_SHA256 =
   "33a7f704eda23dda9ccbd9eba1fda2f0589211e9c61ec9d1f9c797acc624ea44";
+// LOCAL EDIT (fork): upstream 2.0.24 pins the new supplied proxy (535044…),
+// which downloads a server-chosen DLL from rotk.app/api/anti-cheat/download and
+// LoadLibraryA's it into the game process. This fork pins the previous release
+// input instead; its marker vocabulary is "v12" (see CROUCH_PARITY_MARKER_CONTENTS).
+// Restore upstream's hash + "v13-perf1" animation line only with that binary.
+// Analysis: verification/rotk_game_dlls.md (h1z1 repo).
 export const VIVOX_PROXY_SHA256 =
-  "5350449196dea51278b9c70da36ac621d4bda626bcded8c1bb3a83b07ec62c32";
+  "199f0d288f5bec010c5cf20802eb1dc162d27a05b57699268666e93575fec6dd";
 export const CROUCH_PARITY_MARKER_NAME = "rotk-crouch-parity.ini";
 
 const CROUCH_CLIENT_BUILD_ID = "h1z1-1.0.326.439939";
@@ -22,7 +28,7 @@ if (!CROUCH_CLIENT_BUILD) {
 
 export const CROUCH_PARITY_MARKER_CONTENTS = [
   "mode=patch-v2",
-  "animation=v13-perf1-ads-safe-cache256-hints-quiet-pose-only-interruptible-sine-idle400-200-move250",
+  "animation=v12-ads-safe-cache256-lru2s-pose-only-js-sine-idle400-200-move250",
   "cameraScalePitch=disabled",
   `h1z1Sha256=${CROUCH_CLIENT_BUILD.executableSha256.toUpperCase()}`,
   `proxySha256=${VIVOX_PROXY_SHA256.toUpperCase()}`,
