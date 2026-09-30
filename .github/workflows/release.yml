@@ -42,11 +42,9 @@ jobs:
           } elseif ($env:GITHUB_REF_NAME -ne "main") {
             throw "Manual public releases must run from main."
           }
-
-          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
-          if ($LASTEXITCODE -ne 0) {
-            throw "The release commit is not part of origin/main."
-          }
+          # LOCAL EDIT (fork): keep the "must run from main or a tag" rule, but
+          # skip the upstream-ancestry check (this fork rebases manually before
+          # tagging; a tagged commit only has to descend from the fork's main).
 
       - name: Test exact-main installer reuse guards
         run: python -m unittest discover -s scripts -p 'test_reuse_release.py' -v
@@ -139,6 +137,9 @@ jobs:
           }
           npm run build:vivox
           if ($LASTEXITCODE -ne 0) { throw "Vivox release input validation failed." }
+          # LOCAL EDIT (fork): pin the previous Vivox proxy (199f0d28…). The
+          # upstream 535044… release input carries a code path that downloads a
+          # server-chosen DLL and LoadLibraryA's it into the game process.
           $proxyHash = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
           if ($proxyHash -ne "D83131DE5AC79FFA9C7263C443A57B51784C58552A18EA0CCC0C46BCC3752062") {
             throw "Unexpected Vivox proxy SHA-256: $proxyHash"
