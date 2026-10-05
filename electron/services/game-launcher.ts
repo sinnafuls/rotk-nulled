@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { syntheticLogsRoot } from "./synthetic-identity.js";
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 
 // LOCAL EDIT: the game's command line must not carry the Windows user name or
 // the install id; every launch uses a fresh anonymous logs root instead.
@@ -75,8 +75,6 @@ export interface LaunchRequest {
   bundledVivoxProxyPath: string;
   bundledVivoxRuntimePath: string;
   bundledGameplayPatchPath: string;
-  /** Anticheat module the Vivox proxy loads by name from the game root. */
-  bundledRotkcPath: string;
   /**
    * Mode reapplied when the server does not run attestation (development or
    * unconfigured backend). The production path always uses the signed
@@ -178,6 +176,19 @@ function sanitizedEnvironment(
   return environment;
 }
 
+/**
+ * LOCAL EDIT (fork): the anticheat module the bundled Vivox proxy
+ * LoadLibraryA's by name must never exist next to H1Z1.exe — including a stale
+ * copy left by another launcher build. An absent file is the normal case.
+ */
+async function removeForeignRotkc(root: string): Promise<void> {
+  try {
+    await retryFs(() => unlink(join(root, "rotkc.dll")));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 async function prepareClient(
   request: LaunchRequest,
   root: string,
@@ -190,7 +201,6 @@ async function prepareClient(
   // steering configuration and execution to a different tree.
   const activeShimPath = join(root, "steam_api64.dll");
   await retryFs(() => copyFile(request.bundledShimPath, activeShimPath));
-  await retryFs(() => copyFile(request.bundledRotkcPath, join(root, "rotkc.dll")));
   await assertVivoxCompatibility(root);
   // The attestation pass has already installed or removed the shotgun sprint
   // proxy for the mode the server directed; preparation only rechecks it so a
@@ -367,10 +377,16 @@ export class GameLauncher {
     await mkdir(localLogs, { recursive: true });
     await mkdir(failureLogs, { recursive: true });
 
+    // LOCAL EDIT (fork): never ship, copy, or load the rotkc anticheat module.
+    // The bundled Vivox proxy calls LoadLibraryA("rotkc.dll") from the game
+    // root at DLL_PROCESS_ATTACH; removing any copy before attestation and
+    // before the spawn means that call cannot resolve and the module never
+    // enters the game process (and a stale copy is not attested as unexpected).
+    await removeForeignRotkc(installationRoot);
     // Repair the mandatory Vivox/crouch compatibility proxy before
     // attestation. The shotgun sprint proxy is applied by the attestation pass
-    // itself, once the signed challenge has named its mode; an unknown
-    // dinput8.dll blocks the launch instead of being silently deleted.
+    // itself, once the signed challenge has named its mode; a foreign
+    // dinput8.dll is moved aside (never deleted) rather than blocking Play.
     await deployVivoxCompatibility(
       installationRoot,
       request.bundledVivoxProxyPath,

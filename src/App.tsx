@@ -178,6 +178,7 @@ export default function App() {
         onCheck={() => void window.rotk.checkLauncherUpdate()}
         onDownload={() => void perform(() => window.rotk.downloadLauncherUpdate())}
         onInstall={() => void perform(() => window.rotk.installLauncherUpdate())}
+      />
       <NetworkCheckPanel
         open={networkOpen}
         onClose={() => setNetworkOpen(false)}
