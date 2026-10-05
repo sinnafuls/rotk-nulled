@@ -44,6 +44,9 @@ export const MAIN_COPY = {
       busy: "An asset synchronization is already in progress.",
       disabled: "Asset synchronization is disabled in the launcher settings.",
     },
+    anticheat: {
+      settings: "Close H1Z1 before changing the anticheat module setting.",
+    },
   },
   fr: {
     unexpectedError: "Une erreur inattendue est survenue.",
@@ -88,6 +91,9 @@ export const MAIN_COPY = {
       busy: "Une synchronisation des assets est déjà en cours.",
       disabled: "La synchronisation des assets est désactivée dans les réglages du launcher.",
     },
+    anticheat: {
+      settings: "Ferme H1Z1 avant de changer le réglage du module anticheat.",
+    },
   },
   zh: {
     unexpectedError: "出现了意外错误。",
@@ -131,6 +137,9 @@ export const MAIN_COPY = {
     assets: {
       busy: "资源正在同步中。",
       disabled: "资源同步已在启动器设置中关闭。",
+    },
+    anticheat: {
+      settings: "请在关闭 H1Z1 后再修改反作弊模块设置。",
     },
   },
 } as const;

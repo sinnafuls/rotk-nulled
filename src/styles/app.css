@@ -2044,3 +2044,12 @@ button:focus-visible {
 .network-check__foot button:disabled { opacity: 0.5; cursor: default; }
 .network-check__foot .is-spinning { animation: network-check-spin 1s linear infinite; }
 @keyframes network-check-spin { to { transform: rotate(360deg); } }
+
+/* LOCAL EDIT (fork): anticheat-module testing toggle. */
+.anticheat-settings { margin-top: 23px; padding-top: 17px; border-top: 1px solid var(--line); }
+.anticheat-settings h3 { margin: 0 0 12px; font-size: 12px; font-weight: 600; }
+.anticheat-settings__toggle { display: flex; align-items: flex-start; gap: 9px; color: var(--paper-dim); font-size: 12px; line-height: 1.5; cursor: pointer; }
+.anticheat-settings__toggle input { flex: 0 0 auto; width: 14px; height: 14px; margin: 2px 0 0; accent-color: var(--signal); }
+.anticheat-settings__toggle:has(input:disabled) { opacity: 0.6; cursor: default; }
+.anticheat-settings__toggle input:focus-visible { outline: 2px solid var(--paper); outline-offset: 3px; }
+.anticheat-settings p { margin: 8px 0 0 23px; color: var(--muted); font-size: 11px; line-height: 1.6; }

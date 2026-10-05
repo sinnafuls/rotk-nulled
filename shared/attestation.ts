@@ -60,6 +60,11 @@ export const TRUSTED_ATTESTATION_KEYS: Readonly<Record<string, string>> = Object
  *      settings, keybinds), or is rewritten on every launch by the launcher; AND
  *   2. it cannot carry gameplay content or executable code.
  *
+ * Explicit operator exception: the root-level `rotkc.dll` module may change
+ * independently and is allowed with any content, or absent. This is a path
+ * exemption, not a signature or hash verification of that module. It does not
+ * cover nested copies, similarly named files, or other DLLs.
+ *
  * Gameplay packs and other game-loaded executables remain attested. Existing
  * exceptions also cover vanilla `.original.dll` backups and Daybreak's unused,
  * independently updated LaunchPad bootstrap; ROTK starts H1Z1.exe directly.
@@ -79,6 +84,8 @@ export const ATTESTATION_EXCLUDED_PATHS: ReadonlySet<string> = new Set([
   // Daybreak updates this unused bootstrap independently. ROTK launches
   // H1Z1.exe directly; the game executable remains attested.
   "launchpad.exe",
+  // Independently updated client module: exact root path, any hash, optional.
+  "rotkc.dll",
   // Rewritten by the launcher before every launch.
   "clientconfig.ini",
   "battleye/beclient_x64.cfg",

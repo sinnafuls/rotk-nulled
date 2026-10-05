@@ -51,6 +51,7 @@ import {
   resolveBundledVivoxProxyPath,
   resolveBundledVivoxRuntimePath,
   resolveBundledGameplayPatchPath,
+  resolveBundledAnticheatModulePath,
   resolveBundledDiagnosticsPath,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
@@ -202,6 +203,8 @@ let serverStatus: Partial<Record<ServerId, ServerStatus>> = {};
 let quitWhenGameExits = false;
 let crashReportRequests = 0;
 let assetSyncEnabled = true;
+// LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll for the game.
+let anticheatEnabled = false;
 let assetSyncRunning = false;
 let assetSyncStatus: AssetSyncStatus = "idle";
 let assetSyncWarning: AssetSyncWarning | null = null;
@@ -293,6 +296,9 @@ async function findQuarantinedPatches(): Promise<string[]> {
     resolveBundledVivoxProxyPath(),
     resolveBundledVivoxRuntimePath(),
     resolveBundledGameplayPatchPath(),
+    // LOCAL EDIT (fork): the anticheat module is only required when the
+    // testing toggle is on.
+    ...(anticheatEnabled ? [resolveBundledAnticheatModulePath()] : []),
   ];
   const missing: string[] = [];
   for (const path of bundled) {
@@ -617,6 +623,7 @@ async function snapshot(): Promise<LauncherSnapshot> {
     error: lastErrorRaw ? localizeServiceError(lastErrorRaw, currentLocale) : null,
     gamePid,
     updateRequired: hasLauncherUpdate(launcherUpdate.state),
+    anticheatEnabled,
     canPlay:
       phase === "ready"
       && configuredRoot !== null
@@ -1132,6 +1139,8 @@ function registerIpc(): void {
           bundledVivoxProxyPath: resolveBundledVivoxProxyPath(),
           bundledVivoxRuntimePath: resolveBundledVivoxRuntimePath(),
           bundledGameplayPatchPath: resolveBundledGameplayPatchPath(),
+          loadAnticheatModule: anticheatEnabled,
+          bundledAnticheatModulePath: resolveBundledAnticheatModulePath(),
           clientPatchModeFallback:
             await readCachedGameplayPatchMode(join(app.getPath("userData"))) ?? "patched",
           attest: () => attestInstallation(launchCredential.playerKey, launchRuntime),
@@ -1270,6 +1279,24 @@ function registerIpc(): void {
     }),
   );
 
+  // LOCAL EDIT (fork): testing toggle - stage or remove ROTK's rotkc.dll so the
+  // bundled Vivox proxy loads (or never loads) the anticheat module. Applied at
+  // the next launch; off by default.
+  ipcMain.handle(
+    IPC_CHANNELS.setAnticheatEnabled,
+    trustedHandler(async (_event, enabled: unknown): Promise<OperationResult<LauncherSnapshot>> => {
+      if (typeof enabled !== "boolean") throw new Error("Unsupported anticheat setting");
+      if (gameLauncher.isRunning() || phase === "launching" || phase === "running" || phase === "installing") {
+        return { ok: false, error: MAIN_COPY[currentLocale].anticheat.settings };
+      }
+      const config = await configStore.load();
+      await configStore.save({ ...config, loadAnticheatModule: enabled });
+      anticheatEnabled = enabled;
+      await broadcastSnapshot();
+      return { ok: true, value: await snapshot() };
+    }),
+  );
+
   ipcMain.handle(IPC_CHANNELS.minimizeWindow, trustedHandler(async () => mainWindow?.minimize(), { waitForServices: false }));
   ipcMain.handle(IPC_CHANNELS.closeWindow, trustedHandler(async () => mainWindow?.close(), { waitForServices: false }));
 }
@@ -1404,6 +1431,7 @@ async function initialize(): Promise<void> {
   const config = await configStore.load();
   startupLog.mark("config-loaded");
   assetSyncEnabled = config.assetSyncEnabled ?? true;
+  anticheatEnabled = config.loadAnticheatModule === true;
   selectedServerId = config.serverId ?? DEFAULT_SERVER_ID;
   selectedRole = config.role ?? DEFAULT_PLAYER_ROLE;
   const assetState = await assetSync.readState().catch(() => null);
