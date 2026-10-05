@@ -200,6 +200,7 @@ export default function App() {
         onVerifyAssets={() => void perform(() => window.rotk.verifyAssets())}
         onRestoreAssets={() => void perform(() => window.rotk.restoreVanillaAssets())}
         onToggleAssetSync={(enabled) => void perform(() => window.rotk.setAssetSyncEnabled(enabled))}
+        onToggleAnticheat={(enabled) => void perform(() => window.rotk.setAnticheatEnabled(enabled))}
         debugSessionBusy={debugSessionBusy}
         debugSessionFailed={debugSessionFailed}
         debugSessionLocked={debugSessionLocked}
