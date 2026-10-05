@@ -22,9 +22,11 @@ A fork of [`MzKaxD/rotk-launcher`](https://github.com/MzKaxD/rotk-launcher) (its
 | **Loopback telemetry** | `electron/services/client-config.ts`, `game-launcher.ts` | The game's `LaunchTelemetry:Url` is rewritten to `127.0.0.1:15081` and `Logging:Directory` is a random per-launch path. No launcher-side telemetry either. |
 | **Inert auto-updater** | `electron/main.ts` | The updater seam returns `null`. No forced "update required before Play" gate, no version nagging. Manual updates via this repo's Releases page. |
 | **Per-user install, no UAC** | `nsis.perMachine: false`, exe manifest `asInvoker` | Installs into `%LOCALAPPDATA%\Programs\ROTK Launcher`. No admin prompt on install or launch. |
-| **Previous Vivox proxy** | `resources/patches/vivoxsdk_x64.dll` (`199f0d28…`, 71,680 B) | Upstream 2.0.24 ships a new Vivox proxy (`5350449196…`, 80,384 B) that runs `RotkDownloadAnticheat`, POSTs to `rotk.app/api/anti-cheat/download`, and `LoadLibraryA`s a server-chosen DLL into the game on every launch. We ship the previous binary which keeps the crouch/voice compatibility work but has no downloader. |
+| **No anticheat module** | `resources/patches/rotkc.dll` (removed), `electron/services/game-launcher.ts` | Upstream 2.0.28 ships a 15 MB `rotkc.dll` and its Vivox proxy `LoadLibraryA`s it into the game on every launch. The fork ships no such module and deletes any copy from the client before attestation and before the spawn, so it can never load. |
+| **Foreign `dinput8.dll` moved aside** | `electron/services/gameplay-patch.ts` | Upstream refuses to launch when the client holds an unknown `dinput8.dll`. The fork renames it aside (kept on disk, never deleted) and continues in the server's mode, so another DirectInput mod cannot block Play. |
+| **Upstream Vivox proxy** | `resources/patches/vivoxsdk_x64.dll` | The 2.0.24 proxy downloaded a server-chosen DLL. 2.0.28 ships the module and no longer fetches it, so the fork no longer pins the previous binary and tracks upstream's own proxy. |
 
-The gameplay-patch DLL (`dinput8.dll`) is unchanged from upstream 2.0.24 — it's the CZ respawn crash fix (`2c8c7d65…`, v17), which is genuinely useful.
+The gameplay-patch DLL (`dinput8.dll`) tracks upstream 2.0.28 (`73d6a0fc…`, the CZ respawn crash fix), which is genuinely useful. An unrecognized `dinput8.dll` (for example another DirectInput mod) is moved aside rather than deleted, so it never blocks Play.
 
 Everything else — the UI, the client build validation, the launcher-key flow, the asset packs — is upstream code.
 

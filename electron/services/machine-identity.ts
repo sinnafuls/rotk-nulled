@@ -26,7 +26,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { syntheticHwid } from "./synthetic-identity.js";
- import { windowsSystemToolPath } from "./windows-tools.js";
+import { windowsSystemToolPath } from "./windows-tools.js";
 
 const execFileAsync = promisify(execFile);
 

@@ -66,7 +66,8 @@ Every start reconciles the installation against the pinned hashes:
 | launcher 1.4.5/1.4.7 stable DLL (`0d560316…`, 21 504 bytes) | replaced |
 | current 2.0.14 DLL, marker missing | marker repaired |
 | current 2.0.14 DLL + marker | idempotent |
-| unknown `dinput8.dll` / link / directory | refused, never overwritten or deleted |
+| unknown `dinput8.dll` file | moved aside as `*.unknown-<id>.original` (kept, never deleted), then the mode's patch is applied |
+| `dinput8.dll` link / directory | refused, never followed, overwritten or deleted |
 | clean mode with any known DLL | marker removed first, then DLL |
 | marker unwritable | deployment fails closed and removes the DLL it just staged |
 
@@ -125,8 +126,9 @@ Level 2 — local, no server (support instruction):
 2. If no game is running, deleting `dinput8.dll` as well restores the exact
    2.0.13 tree.
 
-Never ask a player to delete an unknown `dinput8.dll`: the launcher refuses to
-touch anything that is not one of the three known hashes, by design.
+Never ask a player to delete an unknown `dinput8.dll`: the launcher moves the
+file aside (keeping it) and then applies the server's mode. Links and
+directories are still left untouched, by design.
 
 Level 3 — launcher-side repair: keep the launcher installed. It re-applies the
 server mode on every launch and rewrites the AppData state, so a player who
