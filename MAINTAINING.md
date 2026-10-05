@@ -32,7 +32,7 @@ git grep -n "LOCAL EDIT (fork)"
 #      electron/services/client-config.ts       (LaunchTelemetry loopback)
 #      electron/services/game-launcher.ts       (argv loopback, anon logs, removeForeignRotkc)
 #      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
-#      electron/main.ts                         (rotateIdentity, updater: null)
+#      electron/main.ts                         (rotateIdentity, updater: null, no elevation gate)
 #      .github/workflows/release.yml            (fork hash pins)
 #      package.json                             ("publish" -> sinnafuls)
 #
@@ -47,6 +47,12 @@ git grep -n "LOCAL EDIT (fork)"
 #
 #    If upstream adds any NEW resources/patches/* DLL, analyze it BEFORE bumping
 #    the version.
+#
+#    If upstream re-adds the administrator-startup gate (a new
+#    electron/services/startup-elevation.ts + `startWithRequiredElevation` in
+#    main.ts), remove it again: initialize() directly in app.whenReady(), keep
+#    `requestedExecutionLevel: asInvoker` and `nsis.perMachine: false`. The
+#    fork never requests UAC.
 
 # 3. Verify the tree.
 PATH="D:/Tools/zig-0.15.2;$PATH" \

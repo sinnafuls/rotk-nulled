@@ -103,7 +103,6 @@ import { DiagnosticController } from "./services/diagnostic-controller.js";
 import { StartupLog } from "./services/startup-log.js";
 import { describeSystemError, isSystemError } from "./services/system-error.js";
 import { redactDiagnosticText } from "./services/diagnostic-redaction.js";
-import { startWithRequiredElevation, windowsElevation } from "./services/startup-elevation.js";
 import { createHash } from 'node:crypto';
 import { uploadDiagnostic } from "./services/diagnostic-upload.js";
 import { collectDiagnosticClientContext } from "./services/diagnostic-client-context.js";
@@ -1487,26 +1486,14 @@ if (singleInstanceLock) {
   void app
     .whenReady()
     .then(async () => {
-      await startWithRequiredElevation({
-        platform: process.platform,
-        isPackaged: app.isPackaged,
-        executablePath: process.execPath,
-        argv: process.argv,
-      }, {
-        ...windowsElevation(resolveBundledDiagnosticsPath()),
-        releaseSingleInstanceLock: () => app.releaseSingleInstanceLock(),
-        initialize: async () => {
-          session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-          session.defaultSession.setPermissionCheckHandler(() => false);
-          await initialize();
-        },
-        quit: () => app.quit(),
-        mark: (event) => startupLog.mark(event),
-        reportFailure: (reason) => {
-          const copy = MAIN_COPY[systemLocale()];
-          dialog.showErrorBox(copy.startupTitle, copy.elevation[reason]);
-        },
-      });
+      // LOCAL EDIT (fork): never require administrator rights or show a UAC
+      // prompt. Upstream 2.0.28 gates startup behind an elevated relaunch
+      // (startWithRequiredElevation); this per-user (asInvoker) build
+      // initializes in-process on whatever token the player launched with.
+      session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+      session.defaultSession.setPermissionCheckHandler(() => false);
+      startupLog.mark("elevation-skipped");
+      await initialize();
     })
     .catch((error: unknown) => {
       startupLog.mark("startup-failed", errorMessage(error));
