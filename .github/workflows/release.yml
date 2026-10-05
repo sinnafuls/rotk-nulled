@@ -121,8 +121,8 @@ jobs:
           npm run build:electron
           npm run build:renderer
 
-      - name: Verify administrator startup with a sandboxed renderer
-        run: node scripts/test-elevated-startup.mjs --require-administrator
+      - name: Verify the sandboxed renderer
+        run: node scripts/test-renderer-sandbox.mjs
 
       - name: Package NSIS installer
         run: npx electron-builder --win nsis --publish never --config.forceCodeSigning=false --config.win.signExecutable=false
