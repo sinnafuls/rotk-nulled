@@ -192,9 +192,6 @@ let destinationRecommended = false;
 let progress: LauncherSnapshot["progress"] = null;
 let updates: LauncherSnapshot["updates"] = [];
 let lastErrorRaw: string | null = null;
-// Set when the server refuses a launch for launcher_update_required: the update
-// becomes mandatory (Play is blocked) until a newer launcher is installed.
-let updateRequired = false;
 let gamePid: number | null = null;
 let currentLocale: AppLocale = "en";
 let playerKeys: PlayerKeySet = {};
@@ -548,11 +545,10 @@ async function attestInstallation(
     };
   } catch (error) {
     attestationProgress = null;
-    // A minimum-version rejection is authoritative and must reach the Play
-    // handler so it can lock the button and surface the mandatory updater UI.
-    if ((error as { code?: string })?.code === "launcher_update_required") {
-      throw error;
-    }
+    // LOCAL EDIT: a server minimum-version rejection is not turned into a local
+    // gate. The fork never self-updates, so it treats the refusal like any
+    // other unreachable attestation - carry the reason and continue with the
+    // cached mode. The server still decides whether the ticket is issued.
     // No policy published / attestation unconfigured: it does not apply, and
     // the launch proceeds silently exactly as before enforcement existed.
     if (error instanceof AttestationUnavailableError && error.notApplicable) {
@@ -619,15 +615,14 @@ async function snapshot(): Promise<LauncherSnapshot> {
     progress,
     error: lastErrorRaw ? localizeServiceError(lastErrorRaw, currentLocale) : null,
     gamePid,
-    updateRequired: updateRequired || hasLauncherUpdate(launcherUpdate.state),
+    updateRequired: hasLauncherUpdate(launcherUpdate.state),
     canPlay:
       phase === "ready"
       && configuredRoot !== null
       && activeKey() !== null
       && !gameLauncher.isRunning()
       && !debugSettingWrite && !diagnosticWorkInProgress()
-      // A mandatory update blocks Play until a newer launcher is installed.
-      && !updateRequired && !hasLauncherUpdate(launcherUpdate.state),
+      && !hasLauncherUpdate(launcherUpdate.state),
   };
 }
 
@@ -1091,7 +1086,7 @@ function registerIpc(): void {
   ipcMain.handle(
     IPC_CHANNELS.play,
     trustedHandler(async (): Promise<OperationResult<{ pid: number }>> => {
-      if (updateRequired || hasLauncherUpdate(launcherUpdate.state)) {
+      if (hasLauncherUpdate(launcherUpdate.state)) {
         return { ok: false, error: MAIN_COPY[currentLocale].update.required };
       }
       if (phase !== "ready" || debugSettingWrite || diagnosticWorkInProgress()) return { ok: false, error: MAIN_COPY[currentLocale].clientNotReady };
@@ -1158,15 +1153,9 @@ function registerIpc(): void {
       } catch (error) {
         if (diagnosticLaunch) await diagnostics.launchFailed(diagnosticLaunch.id, error).catch(() => undefined);
         const result = operationError<{ pid: number }>(error);
-        // A version refusal makes the update mandatory: block Play, and CHECK
-        // for the update (metadata only — autoDownload is false) so the modal
-        // can show that a new version exists. Nothing is downloaded here; the
-        // installer is fetched only when the player consents via the update
-        // action. Any other failure stays retryable, so it must not set the flag.
-        if ((error as { code?: string })?.code === "launcher_update_required") {
-          updateRequired = true;
-          void launcherUpdate.check().catch(() => undefined);
-        }
+        // LOCAL EDIT: a server version refusal stays a plain, retryable error.
+        // The fork never self-updates, so it must not latch a permanent
+        // "update required" gate on the player.
         phase = "ready";
         await broadcastSnapshot();
         if (quitWhenGameExits && !mainWindow && !diagnosticWorkInProgress()) app.quit();
