@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,7 +196,7 @@ describe("shotgun sprint patch deployment", () => {
     await expect(readFile(value.activePath, "utf8")).resolves.toBe(value.retiredOld);
   });
 
-  it("leaves an unknown same-size DLL untouched and blocks deployment", async () => {
+  it("moves an unknown same-size DLL aside and deploys the patch", async () => {
     const value = await fixture();
     const unknown = "x".repeat(value.policy.active.bytes);
     await writeFile(value.activePath, unknown);
@@ -207,8 +207,14 @@ describe("shotgun sprint patch deployment", () => {
         value.bundledPath,
         value.policy,
       ),
-    ).rejects.toThrow(/dinput8[.]dll inconnu/i);
-    await expect(readFile(value.activePath, "utf8")).resolves.toBe(unknown);
+    ).resolves.toBe("installed");
+    // The foreign DLL is preserved on disk and never deleted.
+    const backup = (await readdir(value.root)).find(
+      (name) => name.startsWith(`${GAMEPLAY_PATCH_FILE_NAME}.unknown-`) && name.endsWith(".original"),
+    );
+    if (!backup) throw new Error("the unknown DLL was not kept aside");
+    await expect(readFile(join(value.root, backup), "utf8")).resolves.toBe(unknown);
+    await expect(readFile(value.activePath, "utf8")).resolves.toBe(value.active);
   });
 
   it("fails closed when the marker cannot be written", async () => {
@@ -285,15 +291,20 @@ describe("shotgun sprint patch depatch", () => {
     }
   });
 
-  it("preserves an unknown DLL and blocks the rollback", async () => {
+  it("moves an unknown DLL aside and completes the rollback", async () => {
     const value = await fixture();
     const unknown = "x".repeat(value.policy.active.bytes);
     await writeFile(value.activePath, unknown);
 
     await expect(
       gameplayPatchInternals.depatchGameplayPatchWithPolicy(value.root, value.policy),
-    ).rejects.toThrow(/dinput8[.]dll inconnu/i);
-    await expect(readFile(value.activePath, "utf8")).resolves.toBe(unknown);
+    ).resolves.toBe("absent");
+    await expect(stat(value.activePath)).rejects.toMatchObject({ code: "ENOENT" });
+    const backup = (await readdir(value.root)).find(
+      (name) => name.startsWith(`${GAMEPLAY_PATCH_FILE_NAME}.unknown-`) && name.endsWith(".original"),
+    );
+    if (!backup) throw new Error("the unknown DLL was not kept aside");
+    await expect(readFile(join(value.root, backup), "utf8")).resolves.toBe(unknown);
   });
 });
 

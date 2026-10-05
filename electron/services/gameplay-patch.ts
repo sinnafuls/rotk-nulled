@@ -206,6 +206,35 @@ async function inspectManagedEntry(
   throw new Error(UNKNOWN_DINPUT_ERROR);
 }
 
+/**
+ * Move aside a regular dinput8.dll this launcher does not recognize, then treat
+ * the path as absent. Upstream refuses the launch instead; this fork keeps the
+ * player's file (renamed, never deleted) and continues with the requested mode,
+ * so another DirectInput mod cannot block Play.
+ *
+ * Links and directories still fail closed: a reparse point can target
+ * anything, so it is never followed or moved.
+ */
+async function quarantineUnknownEntry(
+  activePath: string,
+  policy: GameplayPatchPolicy,
+): Promise<ManagedEntry> {
+  try {
+    return await inspectManagedEntry(activePath, policy);
+  } catch (error) {
+    const entry = await lstat(activePath).catch(() => null);
+    if (!entry?.isFile()) throw error;
+    try {
+      // `.original` is an ATTESTATION_EXCLUDED_SUFFIX, so the kept file is not
+      // itself reported as an unexpected client file on the next attestation.
+      await retryFs(() => rename(activePath, `${activePath}.unknown-${randomUUID()}.original`));
+    } catch (renameError) {
+      throw new Error(UNKNOWN_DINPUT_ERROR, { cause: renameError });
+    }
+    return { state: "absent" };
+  }
+}
+
 async function readMarker(
   root: string,
   policy: GameplayPatchPolicy,
@@ -296,7 +325,7 @@ async function deployGameplayPatchWithPolicy(
   await assertSupportedH1Z1(root, policy);
 
   const activePath = join(root, GAMEPLAY_PATCH_FILE_NAME);
-  const initial = await inspectManagedEntry(activePath, policy);
+  const initial = await quarantineUnknownEntry(activePath, policy);
   if (initial.state === "active") {
     if (await readMarker(root, policy) !== policy.marker.contents) {
       await writeMarker(root, policy);
@@ -359,7 +388,7 @@ async function depatchGameplayPatchWithPolicy(
   await removeMarker(root, policy);
 
   const activePath = join(root, GAMEPLAY_PATCH_FILE_NAME);
-  const initial = await inspectManagedEntry(activePath, policy);
+  const initial = await quarantineUnknownEntry(activePath, policy);
   if (initial.state === "absent") return "absent";
 
   // Recheck immediately before deletion so ordinary concurrent drift cannot
