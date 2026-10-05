@@ -84,8 +84,13 @@ jobs:
           $allowedGameplayDll = [System.IO.Path]::GetFullPath(
             (Join-Path $env:GITHUB_WORKSPACE "resources\patches\dinput8.dll")
           )
+          # Bundled for the fork's "load anticheat module" testing toggle; never
+          # copied or loaded unless the player turns the toggle on.
+          $allowedRotkcDll = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:GITHUB_WORKSPACE "resources\patches\rotkc.dll")
+          )
           $unexpectedDlls = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Recurse -File -Filter "*.dll" |
-            Where-Object { @($allowedDll, $allowedVivoxDll, $allowedVivoxProxy, $allowedGameplayDll) -notcontains $_.FullName } |
+            Where-Object { @($allowedDll, $allowedVivoxDll, $allowedVivoxProxy, $allowedGameplayDll, $allowedRotkcDll) -notcontains $_.FullName } |
             Select-Object -ExpandProperty FullName
           if ($unexpectedDlls) {
             $unexpectedDlls | ForEach-Object { Write-Error "DLL inattendu dans le dépôt : $_" }
