@@ -151,6 +151,8 @@ export interface LauncherSnapshot {
   /** The server refused a launch for an out-of-date launcher; Play is blocked
    *  until a newer version is installed. */
   updateRequired: boolean;
+  /** LOCAL EDIT (fork): testing toggle that stages ROTK's rotkc.dll for the game. */
+  anticheatEnabled: boolean;
   canPlay: boolean;
 }
 
@@ -221,6 +223,8 @@ export interface RotkLauncherApi {
   verifyAssets(): Promise<OperationResult>;
   restoreVanillaAssets(): Promise<OperationResult>;
   setAssetSyncEnabled(enabled: boolean): Promise<OperationResult>;
+  /** LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll for the game. */
+  setAnticheatEnabled(enabled: boolean): Promise<OperationResult<LauncherSnapshot>>;
   minimizeWindow(): Promise<void>;
   closeWindow(): Promise<void>;
   onSnapshot(listener: (snapshot: LauncherSnapshot) => void): () => void;
@@ -256,6 +260,7 @@ export const IPC_CHANNELS = {
   verifyAssets: "asset-sync:verify",
   restoreVanillaAssets: "asset-sync:restore",
   setAssetSyncEnabled: "asset-sync:set-enabled",
+  setAnticheatEnabled: "launcher:set-anticheat-enabled",
   minimizeWindow: "window:minimize",
   closeWindow: "window:close",
   snapshotChanged: "launcher:snapshot-changed",
