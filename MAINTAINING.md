@@ -75,7 +75,7 @@ npx electron-builder --win nsis \
 # 5. Sanity-check what the packaged installer will actually deploy:
 sha256sum release/win-unpacked/resources/patches/dinput8.dll \
           release/win-unpacked/resources/patches/vivoxsdk_x64.dll
-#   expected: 73d6a0fc…  dinput8.dll
+#   expected: 987fa565…  dinput8.dll
 #             d7466229…  vivoxsdk_x64.dll
 #   and confirm no rotkc.dll is packaged:
 ls release/win-unpacked/resources/patches/
