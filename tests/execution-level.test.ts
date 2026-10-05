@@ -17,9 +17,9 @@ interface PackageManifest {
  * built-in Administrator account, common on preinstalled or ghosted Windows —
  * Windows refuses to create them ("GPU process launch failed: error_code=18",
  * "Renderer process launch-failed") and Chromium aborts the process. Nothing
- * in-app can catch that abort. The main-process startup gate now enforces
- * administrator rights via UAC before initialization, while this shared
- * executable keeps asInvoker so restricted Chromium children can still start.
+ * in-app can catch that abort. Upstream 2.0.28 gated startup behind a UAC
+ * elevation; this fork removes that gate and keeps the shared executable at
+ * asInvoker, so restricted Chromium children start on any token.
  */
 it("keeps the shared executable compatible with restricted Chromium children", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as PackageManifest;
