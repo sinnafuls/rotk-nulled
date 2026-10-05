@@ -39,6 +39,7 @@ const api: RotkLauncherApi = {
   verifyAssets: () => ipcRenderer.invoke(IPC_CHANNELS.verifyAssets),
   restoreVanillaAssets: () => ipcRenderer.invoke(IPC_CHANNELS.restoreVanillaAssets),
   setAssetSyncEnabled: (enabled) => ipcRenderer.invoke(IPC_CHANNELS.setAssetSyncEnabled, enabled),
+  setAnticheatEnabled: (enabled) => ipcRenderer.invoke(IPC_CHANNELS.setAnticheatEnabled, enabled),
   minimizeWindow: () => ipcRenderer.invoke(IPC_CHANNELS.minimizeWindow),
   closeWindow: () => ipcRenderer.invoke(IPC_CHANNELS.closeWindow),
   onSnapshot: (listener) => {

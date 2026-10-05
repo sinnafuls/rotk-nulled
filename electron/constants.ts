@@ -50,3 +50,12 @@ export function resolveBundledGameplayPatchPath(): string {
     ? join(process.resourcesPath, "patches", "dinput8.dll")
     : join(app.getAppPath(), "resources", "patches", "dinput8.dll");
 }
+
+// LOCAL EDIT (fork): bundled so the "load anticheat module" testing toggle can
+// stage it on demand. It is never copied or loaded unless the player turns the
+// toggle on (see services/anticheat-module.ts).
+export function resolveBundledAnticheatModulePath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "patches", "rotkc.dll")
+    : join(app.getAppPath(), "resources", "patches", "rotkc.dll");
+}

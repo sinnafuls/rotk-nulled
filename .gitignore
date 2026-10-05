@@ -21,3 +21,6 @@ native/vivoxproxy/.zig-tmp*/
 native/vivoxproxy/dist/
 resources/patches/*.pdb
 resources/patches/vivoxsdk_x64_proxy.lib
+
+# Local agent workspace (uploads, scratch)
+.nyx/
