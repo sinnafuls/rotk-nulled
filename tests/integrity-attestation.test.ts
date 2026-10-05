@@ -149,7 +149,23 @@ describe("measureInstallation", () => {
     expect(measurement.deviations).toEqual([]);
   });
 
-  it.each(["rotkc.dll", "plugins/rotkc.dll", "rotkc.dll/injected.dll", "rotkc.dll.bak.dll", "other.dll"])(
+  it.each(["rotkc.dll", "ROTKC.DLL"])("keeps the clean root and evidence when optional %s changes", async (path) => {
+    const expected = [await writeGameFile("H1Z1.exe", "executable")];
+    const options = { installationRoot: installRoot, userDataDirectory: userData, expected, detectUnexpected: true };
+    const clean = await measureInstallation(options);
+    const nonce = "dGVzdC1ub25jZS0xMjM0NTY3ODkw";
+    for (const contents of ["", "module version one", "completely different module version two"]) {
+      await writeGameFile(path, contents);
+      const measurement = await measureInstallation(options);
+      expect(measurement).toEqual(clean);
+      expect(computeAttestationEvidence(nonce, measurement.root))
+        .toBe(computeAttestationEvidence(nonce, computeManifestRoot(expected)));
+    }
+    await rm(join(installRoot, path));
+    expect(await measureInstallation(options)).toEqual(clean);
+  });
+
+  it.each(["plugins/rotkc.dll", "rotkc.dll/injected.dll", "rotkc.dll.bak.dll", "other.dll"])(
     "still reports the unapproved path %s", async (path) => {
       const expected = [await writeGameFile("H1Z1.exe", "executable")];
       await writeGameFile(path, "unapproved code");
@@ -163,10 +179,7 @@ describe("measureInstallation", () => {
     },
   );
 
-  // LOCAL EDIT (fork): rotkc.dll is no longer exempt, so it is now reported as
-  // an ordinary unexpected module instead of being silently tolerated.
-
-  it("reports rotkc.dll alongside other integrity failures", async () => {
+  it("keeps other integrity failures when rotkc.dll is present", async () => {
     const declared = await writeGameFile("vivoxsdk_x64.dll", "approved proxy");
     await writeGameFile("vivoxsdk_x64.dll", "changed proxy");
     await writeGameFile("rotkc.dll", "independent module");
@@ -174,15 +187,13 @@ describe("measureInstallation", () => {
     const measurement = await measureInstallation({
       installationRoot: installRoot, userDataDirectory: userData, expected: [declared], detectUnexpected: true,
     });
-    const deviations = [...measurement.deviations].sort((left, right) => left.path.localeCompare(right.path));
-    expect(deviations).toEqual([
-      { path: "injected.dll", kind: "unexpected", observedSha256: sha256("unapproved code") },
-      { path: "rotkc.dll", kind: "unexpected", observedSha256: sha256("independent module") },
+    expect(measurement.deviations).toEqual([
       { path: "vivoxsdk_x64.dll", kind: "mismatch", observedSha256: sha256("changed proxy") },
+      { path: "injected.dll", kind: "unexpected", observedSha256: sha256("unapproved code") },
     ]);
   });
 
-  it("no longer exempts caller-supplied rotkc paths", async () => {
+  it("applies the same exemption to caller-supplied unexpected paths", async () => {
     const expected = [await writeGameFile("H1Z1.exe", "executable")];
     await writeGameFile("rotkc.dll", "independent module");
     await writeGameFile("plugins/rotkc.dll", "unapproved code");
@@ -191,7 +202,6 @@ describe("measureInstallation", () => {
       unexpectedPaths: ["rotkc.dll", "plugins/rotkc.dll"],
     });
     expect(measurement.deviations).toEqual([
-      { path: "rotkc.dll", kind: "unexpected", observedSha256: sha256("independent module") },
       { path: "plugins/rotkc.dll", kind: "unexpected", observedSha256: sha256("unapproved code") },
     ]);
   });
@@ -394,6 +404,13 @@ describe("buildAttestationResult", () => {
 });
 
 describe("expected-file merge", () => {
+  it("omits rotkc.dll from every manifest layer regardless of its expected hash", () => {
+    const game = { path: "H1Z1.exe", size: 1, sha256: "a".repeat(64) };
+    const module = { path: "rotkc.dll", size: 2, sha256: "b".repeat(64) };
+    const updated = { ...module, path: "ROTKC.DLL", size: 3, sha256: "c".repeat(64) };
+    expect(mergeExpectedFiles([game, module], [updated], [module])).toEqual([game]);
+  });
+
   it("layers assets over the base tree and drops per-player and launcher-rewritten files", () => {
     const base = [
       { path: "H1Z1.exe", size: 1, sha256: "a".repeat(64) },

@@ -6,6 +6,10 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GameLauncher, type GameLaunchDiagnostics, type LaunchRequest } from '../electron/services/game-launcher.js';
 import { RUNTIME_CONFIGS } from '../electron/services/runtime-config.js';
+import { ANTICHEAT_MODULE_BYTES, ANTICHEAT_MODULE_FILE_NAME } from '../electron/services/anticheat-module.js';
+import { fileURLToPath } from 'node:url';
+
+const pinnedAnticheatModule = fileURLToPath(new URL('../resources/patches/rotkc.dll', import.meta.url));
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), gatewayClose: vi.fn(async () => undefined),
   deployVoice: vi.fn(async () => undefined), checkVoice: vi.fn(async () => undefined) }));
@@ -67,7 +71,7 @@ async function fixture() {
     identity: { playerKey: 'test-only-player-key' } as LaunchRequest['identity'],
     runtime: RUNTIME_CONFIGS.test, locale: 'en', logsRoot: join(root, 'logs'), bundledShimPath: join(root, 'bundled-shim.dll'),
     bundledVivoxProxyPath: join(root, 'unused-proxy.dll'), bundledVivoxRuntimePath: join(root, 'unused-runtime.dll'),
-    bundledGameplayPatchPath: join(root, 'unused-dinput8.dll'), clientPatchModeFallback: 'clean',
+    bundledGameplayPatchPath: join(root, 'unused-dinput8.dll'), loadAnticheatModule: false, bundledAnticheatModulePath: join(root, 'unused-rotkc.dll'), clientPatchModeFallback: 'clean',
     diagnostics, onExit: vi.fn(),
   };
   return { launcher: new GameLauncher(), request, diagnostics, child: () => children.at(-1)! };
@@ -169,6 +173,20 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(f.request.onExit).toHaveBeenCalledOnce();
     expect(f.diagnostics.onExit).toHaveBeenCalledOnce();
     expect(f.child().kill).not.toHaveBeenCalled();
+  });
+
+  it('stages the pinned anticheat module only when the toggle is on', async () => {
+    const f = await fixture();
+    expect(await readFile(join(f.request.config.installation!.root, ANTICHEAT_MODULE_FILE_NAME), 'utf8')).toBe('stale anticheat module');
+    f.request.loadAnticheatModule = true;
+    f.request.bundledAnticheatModulePath = pinnedAnticheatModule;
+    const launched = f.launcher.launch(f.request).catch(error => error);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    const staged = await readFile(join(f.request.config.installation!.root, ANTICHEAT_MODULE_FILE_NAME));
+    expect(staged.length).toBe(ANTICHEAT_MODULE_BYTES);
+    expect(staged.subarray(0, 2).toString('ascii')).toBe('MZ');
+    f.child().exit(0);
+    await launched;
   });
 
   it('spawn failures with no PID have an error listener before the process emits its failure', async () => {
