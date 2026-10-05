@@ -707,6 +707,18 @@ const COPY: Record<AppLocale, Copy> = {
       playersUnavailable: "—",
       playersUnknown: "玩家人数不可用",
     },
+    network: {
+      title: "网络检查",
+      button: "检查到所选服务器的网络路径（VPN 诊断）",
+      run: "开始检查",
+      running: "正在探测…",
+      close: "关闭",
+      ok: "正常",
+      warn: "无响应",
+      fail: "失败",
+      failedCount: "失败 — 查看红色行；使用 VPN 时，这是出口被阻断的那一段",
+      allGood: "本机可到达每一段链路",
+    },
     identity: {
       panelLabel: "ROTK 账号验证",
       eyebrow: "ROTK 账号",
