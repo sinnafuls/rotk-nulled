@@ -26,7 +26,7 @@ A fork of [`MzKaxD/rotk-launcher`](https://github.com/MzKaxD/rotk-launcher) (its
 | **Foreign `dinput8.dll` moved aside** | `electron/services/gameplay-patch.ts` | Upstream refuses to launch when the client holds an unknown `dinput8.dll`. The fork renames it aside (kept on disk, never deleted) and continues in the server's mode, so another DirectInput mod cannot block Play. |
 | **Upstream Vivox proxy** | `resources/patches/vivoxsdk_x64.dll` | The 2.0.24 proxy downloaded a server-chosen DLL. 2.0.28 ships the module and no longer fetches it, so the fork no longer pins the previous binary and tracks upstream's own proxy. |
 
-The gameplay-patch DLL (`dinput8.dll`) tracks upstream 2.0.28 (`73d6a0fc…`, the CZ respawn crash fix), which is genuinely useful. An unrecognized `dinput8.dll` (for example another DirectInput mod) is moved aside rather than deleted, so it never blocks Play.
+The gameplay-patch DLL (`dinput8.dll`) tracks upstream 2.0.29 (`987fa565…`, the stock-controls stability update), which is genuinely useful. An unrecognized `dinput8.dll` (for example another DirectInput mod) is moved aside rather than deleted, so it never blocks Play.
 
 Everything else — the UI, the client build validation, the launcher-key flow, the asset packs — is upstream code.
 
