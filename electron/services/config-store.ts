@@ -30,6 +30,12 @@ export interface LauncherConfig {
   /** Versioned consent to private upload, including quarantined memory dumps. */
   diagnosticUploadConsent?: 1;
   /**
+   * LOCAL EDIT (fork): testing toggle. When true the launcher stages ROTK's
+   * rotkc.dll into the game root so the Vivox proxy loads it; off by default,
+   * and when off any copy is removed. See services/anticheat-module.ts.
+   */
+  loadAnticheatModule?: boolean;
+  /**
    * Selected ROTK server. Absent means GAME 2: a launcher that never chose
    * must not silently connect to the test infrastructure. The single client
    * installation serves both — ClientConfig.ini is rewritten at every launch.
@@ -71,6 +77,7 @@ function isValidConfig(value: unknown): value is LauncherConfig {
     (candidate.diagnosticCaptureEnabled === undefined || typeof candidate.diagnosticCaptureEnabled === "boolean") &&
     (candidate.debugSessionEnabled === undefined || typeof candidate.debugSessionEnabled === "boolean") &&
     (candidate.diagnosticUploadConsent === undefined || candidate.diagnosticUploadConsent === 1) &&
+    (candidate.loadAnticheatModule === undefined || typeof candidate.loadAnticheatModule === "boolean") &&
     (candidate.serverId === undefined || isServerId(candidate.serverId)) &&
     (candidate.role === undefined || isPlayerRole(candidate.role))
   );
@@ -83,6 +90,7 @@ function withoutLegacyIdentity(value: LauncherConfig): LauncherConfig {
   if (value.diagnosticCaptureEnabled !== undefined) next.diagnosticCaptureEnabled = value.diagnosticCaptureEnabled;
   if (value.debugSessionEnabled !== undefined) next.debugSessionEnabled = value.debugSessionEnabled;
   if (value.diagnosticUploadConsent === 1) next.diagnosticUploadConsent = 1;
+  if (value.loadAnticheatModule !== undefined) next.loadAnticheatModule = value.loadAnticheatModule;
   if (value.serverId !== undefined) next.serverId = value.serverId;
   if (value.role !== undefined) next.role = value.role;
   return next;

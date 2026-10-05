@@ -30,18 +30,19 @@ git grep -n "LOCAL EDIT (fork)"
 #      electron/services/tpm-identity.ts        (collectTpmProof -> synthetic)
 #      electron/services/tpm-anchor.ts          (collectTpmAnchor -> null)
 #      electron/services/client-config.ts       (LaunchTelemetry loopback)
-#      electron/services/game-launcher.ts       (argv loopback, anon logs, removeForeignRotkc)
+#      electron/services/game-launcher.ts       (argv loopback, anon logs, anticheat toggle)
 #      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
+#      electron/services/anticheat-module.ts    (rotkc pin + stage/remove; off by default)
 #      electron/main.ts                         (rotateIdentity, updater: null, no elevation gate)
 #      .github/workflows/release.yml            (fork hash pins)
 #      package.json                             ("publish" -> sinnafuls)
 #
 #    If upstream re-adds `resources/patches/rotkc.dll` (its anticheat module) or
 #    a Vivox proxy that loads it:
-#      - Keep the fork's rule: never ship, copy, or load `rotkc.dll`. Delete the
-#        bundled binary and re-remove the launch wiring (`git log -S rotkc`).
-#      - `game-launcher.ts` (`removeForeignRotkc`) deletes any copy from the
-#        client; `shared/attestation.ts` no longer exempts it.
+#      - The fork bundles it only for the "load anticheat module" testing
+#        toggle (services/anticheat-module.ts). When upstream ships a new
+#        rotkc.dll, refresh the bundled binary and bump ANTICHEAT_MODULE_SHA256 /
+#        ANTICHEAT_MODULE_BYTES together (`git log -S rotkc`).
 #      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
 #        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
 #
