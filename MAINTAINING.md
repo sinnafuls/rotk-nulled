@@ -26,29 +26,27 @@ git merge upstream/main            # or: git rebase upstream/main
 # 2. Resolve conflicts. The load-bearing files are marked with
 #    `// LOCAL EDIT (fork)` comments — every hit MUST survive:
 git grep -n "LOCAL EDIT (fork)"
-#      electron/services/vivox-client.ts        (VIVOX_PROXY_SHA256 + marker)
 #      electron/services/machine-identity.ts    (collectHwid -> syntheticHwid)
 #      electron/services/tpm-identity.ts        (collectTpmProof -> synthetic)
 #      electron/services/tpm-anchor.ts          (collectTpmAnchor -> null)
 #      electron/services/client-config.ts       (LaunchTelemetry loopback)
-#      electron/services/game-launcher.ts       (argv loopback + anon logs)
+#      electron/services/game-launcher.ts       (argv loopback, anon logs, removeForeignRotkc)
+#      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
 #      electron/main.ts                         (rotateIdentity, updater: null)
-#      scripts/verify-vivox-proxy.mjs           (previous proxy hash + size)
 #      .github/workflows/release.yml            (fork hash pins)
 #      package.json                             ("publish" -> sinnafuls)
 #
-#    If upstream RE-INTRODUCED the new supplied Vivox proxy (5350449196…):
-#      - Keep the fork's previous proxy pin (199f0d28…, 71,680 B).
-#      - The DLL itself lives at `resources/patches/vivoxsdk_x64.dll`; restore
-#        it from the previous git tree:
-#          git checkout HEAD~1 -- resources/patches/vivoxsdk_x64.dll \
-#                                 resources/patches/vivoxsdk_x64.dll.sha256
-#        (or from any commit that carried it, e.g. `git log --oneline --all
-#        resources/patches/vivoxsdk_x64.dll | grep "Fork:"`).
+#    If upstream re-adds `resources/patches/rotkc.dll` (its anticheat module) or
+#    a Vivox proxy that loads it:
+#      - Keep the fork's rule: never ship, copy, or load `rotkc.dll`. Delete the
+#        bundled binary and re-remove the launch wiring (`git log -S rotkc`).
+#      - `game-launcher.ts` (`removeForeignRotkc`) deletes any copy from the
+#        client; `shared/attestation.ts` no longer exempts it.
+#      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
+#        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
 #
-#    If upstream added a NEW resources/patches/* DLL (a new anti-cheat, a new
-#    proxy), analyze it BEFORE bumping the version. See
-#    D:/Projects/enma/h1z1/verification/rotk_game_dlls.md for the workflow.
+#    If upstream adds any NEW resources/patches/* DLL, analyze it BEFORE bumping
+#    the version.
 
 # 3. Verify the tree.
 PATH="D:/Tools/zig-0.15.2;$PATH" \
@@ -71,8 +69,10 @@ npx electron-builder --win nsis \
 # 5. Sanity-check what the packaged installer will actually deploy:
 sha256sum release/win-unpacked/resources/patches/dinput8.dll \
           release/win-unpacked/resources/patches/vivoxsdk_x64.dll
-#   expected: 2c8c7d65…  dinput8.dll
-#             199f0d28…  vivoxsdk_x64.dll  <-- MUST be the previous one
+#   expected: 73d6a0fc…  dinput8.dll
+#             d7466229…  vivoxsdk_x64.dll
+#   and confirm no rotkc.dll is packaged:
+ls release/win-unpacked/resources/patches/
 ```
 
 ## Cutting a release

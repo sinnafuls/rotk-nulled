@@ -51,7 +51,6 @@ import {
   resolveBundledVivoxProxyPath,
   resolveBundledVivoxRuntimePath,
   resolveBundledGameplayPatchPath,
-  resolveBundledRotkcPath,
   resolveBundledDiagnosticsPath,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
@@ -296,7 +295,6 @@ async function findQuarantinedPatches(): Promise<string[]> {
     resolveBundledVivoxProxyPath(),
     resolveBundledVivoxRuntimePath(),
     resolveBundledGameplayPatchPath(),
-    resolveBundledRotkcPath(),
   ];
   const missing: string[] = [];
   for (const path of bundled) {
@@ -1138,7 +1136,6 @@ function registerIpc(): void {
           bundledVivoxProxyPath: resolveBundledVivoxProxyPath(),
           bundledVivoxRuntimePath: resolveBundledVivoxRuntimePath(),
           bundledGameplayPatchPath: resolveBundledGameplayPatchPath(),
-          bundledRotkcPath: resolveBundledRotkcPath(),
           clientPatchModeFallback:
             await readCachedGameplayPatchMode(join(app.getPath("userData"))) ?? "patched",
           attest: () => attestInstallation(launchCredential.playerKey, launchRuntime),
