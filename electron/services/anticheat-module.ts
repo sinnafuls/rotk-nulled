@@ -13,10 +13,10 @@ import { retryFs } from "./fs-safe.js";
  * the testing toggle on, and removes any copy when the toggle is off.
  */
 export const ANTICHEAT_MODULE_FILE_NAME = "rotkc.dll";
-/** Pinned upstream artifact (launcher 2.0.31); bump together with upstream. */
+/** Pinned upstream artifact (launcher 2.0.32); bump together with upstream. */
 export const ANTICHEAT_MODULE_SHA256 =
-  "6035740110328df20ae5b6134f559c95c117a2601f584d4f8df706a8973998d0";
-export const ANTICHEAT_MODULE_BYTES = 16_778_240;
+  "f519670ae57aa7bd1a84744d01d4ad7a7ddf9cc62b9361b48de76023a9dc7111";
+export const ANTICHEAT_MODULE_BYTES = 16_733_184;
 
 const INVALID_BUNDLED_MODULE_ERROR =
   "Le module anticheat ROTK embarqué est absent ou modifié.";
