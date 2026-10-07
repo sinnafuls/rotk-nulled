@@ -40,11 +40,16 @@ git grep -n "LOCAL EDIT (fork)"
 #    If upstream re-adds `resources/patches/rotkc.dll` (its anticheat module) or
 #    a Vivox proxy that loads it:
 #      - The fork bundles it only for the "load anticheat module" testing
-#        toggle (services/anticheat-module.ts). When upstream ships a new
-#        rotkc.dll, refresh the bundled binary and bump ANTICHEAT_MODULE_SHA256 /
-#        ANTICHEAT_MODULE_BYTES together (`git log -S rotkc`).
+#        toggle (services/anticheat-module.ts). Never edit or delete the
+#        bundled binary in a fork commit: `resources/patches/*.dll` are upstream
+#        release inputs, so every sync would conflict. A new upstream rotkc.dll
+#        only needs ANTICHEAT_MODULE_SHA256 / ANTICHEAT_MODULE_BYTES bumped to
+#        match (the binary itself arrives with the rebase).
 #      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
 #        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
+#
+#    Never commit `.nyx/` (local agent workspace: uploads, scratch); it is
+#    gitignored, and re-adding it makes the next rebase abort on untracked files.
 #
 #    If upstream adds any NEW resources/patches/* DLL, analyze it BEFORE bumping
 #    the version.
