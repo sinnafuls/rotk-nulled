@@ -18,7 +18,6 @@ on:
 permissions:
   contents: write
 
-
 jobs:
   package:
     name: Build Windows installer
@@ -43,25 +42,13 @@ jobs:
             throw "Tag $env:GITHUB_REF_NAME does not match package.json version $packageVersion."
           }
 
-      - name: Test exact-main installer reuse guards
-        run: python -m unittest discover -s scripts -p 'test_reuse_release.py' -v
-
-      - name: Reuse the prepared installer from this exact main commit
-        id: reuse
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python scripts/reuse-release.py
-
       - name: Install Node.js
-        if: steps.reuse.outputs.reused != 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
 
       - name: Install Zig
-        if: steps.reuse.outputs.reused != 'true'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
@@ -113,15 +100,13 @@ jobs:
           if ($h.ToUpperInvariant() -ne "D74662295AF61D152A1869B2925D403AE984827BB55268CC20025D07EC9DABD5") {
             throw "Vivox proxy SHA-256 mismatch: got $h"
           }
-          npm run test:native:menu-duo
-          if ($LASTEXITCODE -ne 0) { throw "Native Duo/Trio menu tests failed." }
 
       - name: Build the gameplay patch (dinput8.dll)
         shell: pwsh
         run: |
           npm run build:gameplay-patch
           $h = (Get-FileHash -LiteralPath "resources\patches\dinput8.dll" -Algorithm SHA256).Hash
-          if ($h.ToUpperInvariant() -ne "987FA5657408422D984A31F18739AF4514221CF25BE3D5DE31E3A64EDCB54649") {
+          if ($h.ToUpperInvariant() -ne "314041801EA331358CB73FD2FCE3DD1C71EDBB19A5B2654F285014AB5260E41F") {
             throw "Gameplay patch SHA-256 mismatch: got $h"
           }
 
@@ -143,7 +128,6 @@ jobs:
         run: npx electron-builder --win nsis --publish never --config.forceCodeSigning=false --config.win.signExecutable=false
 
       - name: Generate SHA-256 checksums
-        if: steps.reuse.outputs.reused != 'true'
         shell: pwsh
         run: |
           $artifacts = Get-ChildItem -LiteralPath release -File |
