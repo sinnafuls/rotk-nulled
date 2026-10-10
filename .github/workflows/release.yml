@@ -97,7 +97,7 @@ jobs:
           # previous binary; it prevents the server-supplied module from ever
           # loading by removing rotkc.dll instead (see game-launcher.ts).
           $h = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
-          if ($h.ToUpperInvariant() -ne "D74662295AF61D152A1869B2925D403AE984827BB55268CC20025D07EC9DABD5") {
+          if ($h.ToUpperInvariant() -ne "D83131DE5AC79FFA9C7263C443A57B51784C58552A18EA0CCC0C46BCC3752062") {
             throw "Vivox proxy SHA-256 mismatch: got $h"
           }
 
@@ -106,7 +106,7 @@ jobs:
         run: |
           npm run build:gameplay-patch
           $h = (Get-FileHash -LiteralPath "resources\patches\dinput8.dll" -Algorithm SHA256).Hash
-          if ($h.ToUpperInvariant() -ne "314041801EA331358CB73FD2FCE3DD1C71EDBB19A5B2654F285014AB5260E41F") {
+          if ($h.ToUpperInvariant() -ne "50FC571D149ADAC1A86470BA79954EA35F713E2D02C8D88EF2BAF22F326F525A") {
             throw "Gameplay patch SHA-256 mismatch: got $h"
           }
 
