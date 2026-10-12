@@ -53,7 +53,6 @@ import {
   resolveBundledGameplayPatchPath,
   resolveBundledAnticheatModulePath,
   resolveBundledDiagnosticsPath,
-  REPORTED_LAUNCHER_VERSION,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
 import { DiscordPresence } from "./services/discord-presence.js";
@@ -442,7 +441,7 @@ async function attestInstallation(
 ): Promise<AttestationOutcome> {
   const root = await installationRoot();
   const userDataDirectory = app.getPath("userData");
-  const launcherVersion = REPORTED_LAUNCHER_VERSION;
+  const launcherVersion = app.getVersion();
   // A server that does not run attestation (no policy yet, development
   // backend) gets the last mode this player was told to use; a fresh machine
   // starts on the shipped default. Production always uses the signed
@@ -1032,7 +1031,7 @@ function registerIpc(): void {
               shimPath: resolveBundledShimPath(),
               vivoxProxyPath: resolveBundledVivoxProxyPath(),
               vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
-              launcherVersion: REPORTED_LAUNCHER_VERSION,
+              launcherVersion: app.getVersion(),
               onProgress,
             })
           : await installClient({
@@ -1041,7 +1040,7 @@ function registerIpc(): void {
               shimPath: resolveBundledShimPath(),
               vivoxProxyPath: resolveBundledVivoxProxyPath(),
               vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
-              launcherVersion: REPORTED_LAUNCHER_VERSION,
+              launcherVersion: app.getVersion(),
               signal: installAbortController.signal,
               onProgress,
             });
@@ -1145,7 +1144,7 @@ function registerIpc(): void {
           clientPatchModeFallback:
             await readCachedGameplayPatchMode(join(app.getPath("userData"))) ?? "patched",
           attest: () => attestInstallation(launchCredential.playerKey, launchRuntime),
-          launcherVersion: REPORTED_LAUNCHER_VERSION,
+          launcherVersion: app.getVersion(),
           diagnostics: diagnosticLaunch?.hooks,
           presence: discordPresence,
           // Best-effort hardware fingerprint; the server hashes it. A failure
