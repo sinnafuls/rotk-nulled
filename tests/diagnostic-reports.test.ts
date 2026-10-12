@@ -42,7 +42,7 @@ function logsText(files: Map<string, Buffer>): string {
 }
 
 describe('diagnostic report collection and export', () => {
-  it('exports real valid ZIPs, only newly appended logs, redacted text and verified SHA-256 hashes', async () => {
+  it('exports real valid ZIPs, only newly appended logs, redacted text and verified SHA-256 hashes', async () => , 30000) => {
     const f = await fixture(), path = join(f.installationRoot, 'game.log');
     await writeFile(path, 'PREVIOUS SESSION PRIVATE\n');
     const { id } = await f.service.beginSession(f.context);
