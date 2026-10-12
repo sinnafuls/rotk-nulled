@@ -98,9 +98,13 @@ ls release/win-unpacked/resources/patches/
 
 ## Cutting a release
 
-The version in `package.json` follows upstream (the launcher checks against it
-on the wire). Tag with `v<version>` — the release workflow requires the tag to
-match `package.json.version`.
+`package.json.version` is the fork's own release number; tag with
+`v<version>` (the release workflow requires the tag to match it). The version
+sent to ROTK's servers is separate: `REPORTED_LAUNCHER_VERSION` in
+`electron/constants.ts`, which must be a version upstream has actually shipped
+or the attestation and ticket routes refuse the launch ("This launcher version
+is too old to verify the game files"). Set it to the upstream version on every
+sync; a fork release past upstream keeps reporting upstream's number.
 
 ```
 git commit -am "Fork: sync to launcher <version>"

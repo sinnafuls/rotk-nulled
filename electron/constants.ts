@@ -2,6 +2,15 @@ import { join } from "node:path";
 import { app } from "electron";
 
 export const APP_NAME = "ROTK Launcher";
+
+// LOCAL EDIT (fork): the version REPORTED to ROTK's servers. The attestation
+// and launch-ticket routes refuse any launcher version they have not shipped
+// ("This launcher version is too old to verify the game files"), and a fork
+// release number past upstream's is exactly that. package.json keeps the fork's
+// own number for releases; every server-facing request sends this one. Bump it
+// to the upstream launcher version each fork sync (the "Fork: sync to launcher
+// X" commits), never to the fork's.
+export const REPORTED_LAUNCHER_VERSION = "2.0.36";
 export const WEBSITE_ORIGIN = "https://rotk.app";
 export const WEBSITE_UPDATES_PATH = "/updates";
 export const FORBIDDEN_INSTALL_SEGMENTS = new Set([
