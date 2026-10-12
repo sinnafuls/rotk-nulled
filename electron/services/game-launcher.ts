@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { syntheticLogsRoot } from "./synthetic-identity.js";
-import { copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 
 // LOCAL EDIT: the game's command line must not carry the Windows user name or
 // the install id; every launch uses a fresh anonymous logs root instead.
