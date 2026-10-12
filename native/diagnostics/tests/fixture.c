@@ -10,7 +10,8 @@ static DWORD WINAPI performance_worker(void *parameter) {
     ULONGLONG until = GetTickCount64() + 4000;
     unsigned long value = 1;
     while (GetTickCount64() < until) {
-        ULONGLONG busy_until = GetTickCount64() + 8;
+        /* Span the coarse Windows clock tick so the CPU sampler observes real work. */
+        ULONGLONG busy_until = GetTickCount64() + 50;
         while (GetTickCount64() < busy_until) for (unsigned i = 0; i < 1000; ++i) value = value * 1664525U + 1013904223U;
         Sleep(8);
     }

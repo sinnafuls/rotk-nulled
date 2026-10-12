@@ -29,6 +29,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Vérifier la réutilisation des installers préparés
+        run: python -m unittest discover -s scripts -p 'test_reuse_release.py' -v
+
       - name: Installer Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -81,6 +84,11 @@ jobs:
           $allowedGameplayDll = [System.IO.Path]::GetFullPath(
             (Join-Path $env:GITHUB_WORKSPACE "resources\patches\dinput8.dll")
           )
+          # Bundled for the fork's "load anticheat module" testing toggle; never
+          # copied or loaded unless the player turns the toggle on.
+          $allowedRotkcDll = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:GITHUB_WORKSPACE "resources\patches\rotkc.dll")
+          )
           $unexpectedDlls = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Recurse -File -Filter "*.dll" |
             Where-Object { @($allowedDll, $allowedVivoxDll, $allowedVivoxProxy, $allowedGameplayDll) -notcontains $_.FullName } |
             Select-Object -ExpandProperty FullName
@@ -90,7 +98,7 @@ jobs:
           }
 
           $gameplayHash = (Get-FileHash -LiteralPath $allowedGameplayDll -Algorithm SHA256).Hash
-          if ($gameplayHash -ne "987FA5657408422D984A31F18739AF4514221CF25BE3D5DE31E3A64EDCB54649") {
+          if ($gameplayHash -ne "50FC571D149ADAC1A86470BA79954EA35F713E2D02C8D88EF2BAF22F326F525A") {
             throw "Unexpected shotgun sprint proxy SHA-256: $gameplayHash"
           }
           $gameplaySidecar = ((Get-Content -LiteralPath "$allowedGameplayDll.sha256" -Raw) -split "\s+")[0]
@@ -199,8 +207,7 @@ jobs:
         run: |
           npm run build:vivox
           if ($LASTEXITCODE -ne 0) { throw "Vivox release input validation failed." }
-          # The supplied 2.0.24 release input is independent of these sources.
-          # Both reference builds must still reproduce the prior reference hash.
+          # Both source builds must reproduce the bundled no-reply proxy.
           npm run build:vivox:source
           if ($LASTEXITCODE -ne 0) { throw "Reference Vivox build failed." }
           $reference = Join-Path $env:GITHUB_WORKSPACE "native\vivoxproxy\dist\vivoxsdk_x64.dll"
@@ -209,9 +216,11 @@ jobs:
           & powershell -NoProfile -ExecutionPolicy Bypass -File native/vivoxproxy/build-v5-compat.ps1 -OutputPath $alternateProxy
           if ($LASTEXITCODE -ne 0) { throw "Second reference Vivox build failed." }
           $alternateHash = (Get-FileHash -LiteralPath $alternateProxy -Algorithm SHA256).Hash
-          if ($hash -ne $alternateHash -or $hash -ne "D74662295AF61D152A1869B2925D403AE984827BB55268CC20025D07EC9DABD5") {
+          if ($hash -ne $alternateHash -or $hash -ne "672DE2C855A77C23D899D2B4F2801A93053BF8C872366EC2BC14BC0F7CA3AB61") {
             throw "The reference Vivox source build changed: $hash / $alternateHash"
           }
+          $bundledHash = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
+          if ($hash -ne $bundledHash) { throw "Vivox source and bundled proxy differ." }
           # Prove neither source build overwrote the release input or sidecar.
           npm run verify:vivox-proxy
           if ($LASTEXITCODE -ne 0) { throw "Supplied Vivox release input changed." }

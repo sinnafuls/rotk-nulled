@@ -32,6 +32,9 @@ git grep -n "LOCAL EDIT (fork)"
 #      electron/services/client-config.ts       (LaunchTelemetry loopback)
 #      electron/services/game-launcher.ts       (argv loopback, anon logs, removeForeignRotkc)
 #      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
+#      electron/services/game-launcher.ts       (argv loopback, anon logs, anticheat toggle)
+#      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
+#      electron/services/anticheat-module.ts    (rotkc pin + stage/remove; off by default)
 #      electron/main.ts                         (rotateIdentity, updater: null, no elevation gate)
 #      .github/workflows/release.yml            (fork hash pins)
 #      package.json                             ("publish" -> sinnafuls)
@@ -44,6 +47,18 @@ git grep -n "LOCAL EDIT (fork)"
 #        client; `shared/attestation.ts` no longer exempts it.
 #      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
 #        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
+#
+#      - The fork bundles it only for the "load anticheat module" testing
+#        toggle (services/anticheat-module.ts). Never edit or delete the
+#        bundled binary in a fork commit: `resources/patches/*.dll` are upstream
+#        release inputs, so every sync would conflict. A new upstream rotkc.dll
+#        only needs ANTICHEAT_MODULE_SHA256 / ANTICHEAT_MODULE_BYTES bumped to
+#        match (the binary itself arrives with the rebase).
+#      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
+#        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
+#
+#    Never commit `.nyx/` (local agent workspace: uploads, scratch); it is
+#    gitignored, and re-adding it makes the next rebase abort on untracked files.
 #
 #    If upstream adds any NEW resources/patches/* DLL, analyze it BEFORE bumping
 #    the version.

@@ -51,9 +51,11 @@ import {
   resolveBundledVivoxProxyPath,
   resolveBundledVivoxRuntimePath,
   resolveBundledGameplayPatchPath,
+  resolveBundledAnticheatModulePath,
   resolveBundledDiagnosticsPath,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
+import { DiscordPresence } from "./services/discord-presence.js";
 import { adoptExistingClient, installClient } from "./services/installer.js";
 import {
   GameLauncher,
@@ -178,6 +180,7 @@ const servicesReady = new Promise<void>((resolve) => {
   resolveServicesReady = resolve;
 });
 const gameLauncher = new GameLauncher();
+const discordPresence = new DiscordPresence();
 const LAUNCHER_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1_000;
 // The window is shown at the latest this long after its creation, painted or not.
 const WINDOW_SHOW_DEADLINE_MS = 5_000;
@@ -200,6 +203,8 @@ let serverStatus: Partial<Record<ServerId, ServerStatus>> = {};
 let quitWhenGameExits = false;
 let crashReportRequests = 0;
 let assetSyncEnabled = true;
+// LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll for the game.
+let anticheatEnabled = false;
 let assetSyncRunning = false;
 let assetSyncStatus: AssetSyncStatus = "idle";
 let assetSyncWarning: AssetSyncWarning | null = null;
@@ -291,6 +296,9 @@ async function findQuarantinedPatches(): Promise<string[]> {
     resolveBundledVivoxProxyPath(),
     resolveBundledVivoxRuntimePath(),
     resolveBundledGameplayPatchPath(),
+    // LOCAL EDIT (fork): the anticheat module is only required when the
+    // testing toggle is on.
+    ...(anticheatEnabled ? [resolveBundledAnticheatModulePath()] : []),
   ];
   const missing: string[] = [];
   for (const path of bundled) {
@@ -615,6 +623,7 @@ async function snapshot(): Promise<LauncherSnapshot> {
     error: lastErrorRaw ? localizeServiceError(lastErrorRaw, currentLocale) : null,
     gamePid,
     updateRequired: hasLauncherUpdate(launcherUpdate.state),
+    anticheatEnabled,
     canPlay:
       phase === "ready"
       && configuredRoot !== null
@@ -1130,11 +1139,14 @@ function registerIpc(): void {
           bundledVivoxProxyPath: resolveBundledVivoxProxyPath(),
           bundledVivoxRuntimePath: resolveBundledVivoxRuntimePath(),
           bundledGameplayPatchPath: resolveBundledGameplayPatchPath(),
+          loadAnticheatModule: anticheatEnabled,
+          bundledAnticheatModulePath: resolveBundledAnticheatModulePath(),
           clientPatchModeFallback:
             await readCachedGameplayPatchMode(join(app.getPath("userData"))) ?? "patched",
           attest: () => attestInstallation(launchCredential.playerKey, launchRuntime),
           launcherVersion: app.getVersion(),
           diagnostics: diagnosticLaunch?.hooks,
+          presence: discordPresence,
           // Best-effort hardware fingerprint; the server hashes it. A failure
           // must never block a launch, so it degrades to no HWID signal.
           hwid: await collectHwid().catch(() => ({})),
@@ -1264,6 +1276,24 @@ function registerIpc(): void {
       assetSyncWarning = null;
       await broadcastSnapshot();
       return { ok: true };
+    }),
+  );
+
+  // LOCAL EDIT (fork): testing toggle - stage or remove ROTK's rotkc.dll so the
+  // bundled Vivox proxy loads (or never loads) the anticheat module. Applied at
+  // the next launch; off by default.
+  ipcMain.handle(
+    IPC_CHANNELS.setAnticheatEnabled,
+    trustedHandler(async (_event, enabled: unknown): Promise<OperationResult<LauncherSnapshot>> => {
+      if (typeof enabled !== "boolean") throw new Error("Unsupported anticheat setting");
+      if (gameLauncher.isRunning() || phase === "launching" || phase === "running" || phase === "installing") {
+        return { ok: false, error: MAIN_COPY[currentLocale].anticheat.settings };
+      }
+      const config = await configStore.load();
+      await configStore.save({ ...config, loadAnticheatModule: enabled });
+      anticheatEnabled = enabled;
+      await broadcastSnapshot();
+      return { ok: true, value: await snapshot() };
     }),
   );
 
@@ -1401,6 +1431,7 @@ async function initialize(): Promise<void> {
   const config = await configStore.load();
   startupLog.mark("config-loaded");
   assetSyncEnabled = config.assetSyncEnabled ?? true;
+  anticheatEnabled = config.loadAnticheatModule === true;
   selectedServerId = config.serverId ?? DEFAULT_SERVER_ID;
   selectedRole = config.role ?? DEFAULT_PLAYER_ROLE;
   const assetState = await assetSync.readState().catch(() => null);
@@ -1512,6 +1543,7 @@ if (singleInstanceLock) {
     }
     app.quit();
   });
+  app.on("will-quit", () => discordPresence.stop());
 }
 
 process.on("uncaughtException", (error) => {

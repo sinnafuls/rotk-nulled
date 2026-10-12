@@ -25,8 +25,8 @@ if (-not (Test-Path -LiteralPath $proxy -PathType Leaf)) {
     throw "Shotgun sprint proxy not found: $proxy"
 }
 
-$expectedHash = "987FA5657408422D984A31F18739AF4514221CF25BE3D5DE31E3A64EDCB54649"
-$expectedBytes = 33792
+$expectedHash = "50FC571D149ADAC1A86470BA79954EA35F713E2D02C8D88EF2BAF22F326F525A"
+$expectedBytes = 44032
 function Get-Sha256([string]$Path) {
     $stream = [System.IO.File]::OpenRead($Path)
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
@@ -198,6 +198,24 @@ if ($LASTEXITCODE -ne -1073741819) { throw "CZ native access violation was not r
 & $respawnExe
 if ($LASTEXITCODE -ne 0) { throw "CZ respawn repair test failed." }
 
-Write-Host "Shotgun sprint and weapon stance DirectInput proxy tests passed."
+$rebootExe = Join-Path $testRoot "trio_reboot_camera_test.exe"
+& $zig.Source @(
+    "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "-o", $rebootExe, (Join-Path $root "tests\trio_reboot_camera_test.c"), "-luser32"
+)
+if ($LASTEXITCODE -ne 0) { throw "Trio reboot camera test compilation failed." }
+& $rebootExe
+if ($LASTEXITCODE -ne 0) { throw "Trio reboot camera test failed." }
+
+$nameplateExe = Join-Path $testRoot "spectator_nameplate_color_test.exe"
+& $zig.Source @(
+    "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "-o", $nameplateExe, (Join-Path $root "tests\spectator_nameplate_color_test.c"), "-luser32"
+)
+if ($LASTEXITCODE -ne 0) { throw "Spectator nameplate test compilation failed." }
+& $nameplateExe
+if ($LASTEXITCODE -ne 0) { throw "Spectator nameplate test failed." }
+
+Write-Host "Shotgun sprint, weapon stance, respawn, Trio reboot and spectator nameplate proxy tests passed."
 Write-Host "  Size $actualBytes bytes"
 Write-Host "  SHA256 $actualHash"

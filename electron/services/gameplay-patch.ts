@@ -7,20 +7,30 @@ import { SUPPORTED_CLIENT_BUILDS } from "./client-build.js";
 
 export const GAMEPLAY_PATCH_FILE_NAME = "dinput8.dll";
 export const GAMEPLAY_PATCH_SHA256 =
-  "987fa5657408422d984a31f18739af4514221cf25be3d5de31e3a64edcb54649";
-export const GAMEPLAY_PATCH_BYTES = 33_792;
+  "50fc571d149adac1a86470ba79954ea35f713e2d02c8d88ef2baf22f326f525a";
+export const GAMEPLAY_PATCH_BYTES = 44_032;
 
 /**
  * Marker next to H1Z1.exe. The proxy enables the sprint byte pair and guarded
- * stance hooks only with this exact mode and patch list. Removing it disables
- * stance behavior and restores the sprint bytes within two seconds; dormant
- * trampolines and the CZ continuation-address repair remain until the game
- * exits. Full removal requires a restart.
+ * stance hooks and nameplate correction only with this exact mode and patch
+ * list. Removing it disables stance behavior and restores sprint and nameplate
+ * bytes within two seconds; dormant trampolines and the CZ continuation-address
+ * repair remain until the game exits. Full removal requires a restart.
  */
 export const GAMEPLAY_MARKER_FILE_NAME = "rotk-shotgun-sprint.ini";
 
 /** Exact retired ROTK artifacts an automatic migration may replace. */
 export const RETIRED_GAMEPLAY_PATCHES = Object.freeze([
+  Object.freeze({
+    // Previous Trio camera proxy, before the spectator nameplate correction.
+    sha256: "314041801ea331358cb73fd2fce3dd1c71edbb19a5b2654f285014ab5260e41f",
+    bytes: 41_472,
+  }),
+  Object.freeze({
+    // Current v16/CZ repair before the Trio reboot camera restoration.
+    sha256: "987fa5657408422d984a31f18739af4514221cf25be3d5de31e3a64edcb54649",
+    bytes: 33_792,
+  }),
   Object.freeze({
     // Launcher 2.0.28: retire v17 input lookups and the custom console hooks.
     sha256: "73d6a0fca5ee4a0aac04be49b2440fd26545444bf912fc3e69a5287824c4f230",

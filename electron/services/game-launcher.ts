@@ -9,6 +9,7 @@ let currentLogsRoot = syntheticLogsRoot();
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { retryFs } from "./fs-safe.js";
+import { installAnticheatModule, removeAnticheatModule } from "./anticheat-module.js";
 import type { InstalledClientConfig, LauncherConfig } from "./config-store.js";
 import type { RuntimeConfig } from "./runtime-config.js";
 import { serverList } from "./runtime-config.js";
@@ -75,6 +76,10 @@ export interface LaunchRequest {
   bundledVivoxProxyPath: string;
   bundledVivoxRuntimePath: string;
   bundledGameplayPatchPath: string;
+  /** LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll into the game. */
+  loadAnticheatModule: boolean;
+  /** LOCAL EDIT (fork): the pinned rotkc.dll staged when the toggle is on. */
+  bundledAnticheatModulePath: string;
   /**
    * Mode reapplied when the server does not run attestation (development or
    * unconfigured backend). The production path always uses the signed
@@ -93,6 +98,8 @@ export interface LaunchRequest {
   hwid?: Record<string, string>;
   /** Best-effort telemetry only. Diagnostic failures never control the game lifecycle. */
   diagnostics?: GameLaunchDiagnostics;
+  /** Optional local presence; failures never control the game lifecycle. */
+  presence?: { start(pid: number): void; stop(): void };
   onExit(exitCode: number | null): void;
 }
 
@@ -176,18 +183,6 @@ function sanitizedEnvironment(
   return environment;
 }
 
-/**
- * LOCAL EDIT (fork): the anticheat module the bundled Vivox proxy
- * LoadLibraryA's by name must never exist next to H1Z1.exe — including a stale
- * copy left by another launcher build. An absent file is the normal case.
- */
-async function removeForeignRotkc(root: string): Promise<void> {
-  try {
-    await retryFs(() => unlink(join(root, "rotkc.dll")));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
 
 async function prepareClient(
   request: LaunchRequest,
@@ -377,12 +372,18 @@ export class GameLauncher {
     await mkdir(localLogs, { recursive: true });
     await mkdir(failureLogs, { recursive: true });
 
-    // LOCAL EDIT (fork): never ship, copy, or load the rotkc anticheat module.
-    // The bundled Vivox proxy calls LoadLibraryA("rotkc.dll") from the game
-    // root at DLL_PROCESS_ATTACH; removing any copy before attestation and
-    // before the spawn means that call cannot resolve and the module never
-    // enters the game process (and a stale copy is not attested as unexpected).
-    await removeForeignRotkc(installationRoot);
+    // LOCAL EDIT (fork): the Vivox proxy loads rotkc.dll by name from the game
+    // root, so the testing toggle is applied by staging or removing the file
+    // before attestation and before the spawn. Off (the default) removes any
+    // copy, including a stale one left by another launcher build, and the
+    // module can never load. rotkc itself never reads the module list, and the
+    // cheat reaches the client through the unhooked PlayClient global whether
+    // the module is present or not (verification/rotk_game_dlls.md section 13).
+    if (request.loadAnticheatModule) {
+      await installAnticheatModule(installationRoot, request.bundledAnticheatModulePath);
+    } else {
+      await removeAnticheatModule(installationRoot);
+    }
     // Repair the mandatory Vivox/crouch compatibility proxy before
     // attestation. The shotgun sprint proxy is applied by the attestation pass
     // itself, once the signed challenge has named its mode; a foreign
@@ -485,6 +486,7 @@ export class GameLauncher {
       const finalize = (code: number | null, signal: NodeJS.Signals | null = null): void => {
         if (finalized) return;
         finalized = true;
+        try { request.presence?.stop(); } catch { /* Presence is optional. */ }
         if (this.child === child) this.child = null;
         void sessionGateway.close().catch(() => undefined);
         // Preserve the local gateway/game lifecycle, but keep the launcher alive
@@ -499,6 +501,9 @@ export class GameLauncher {
       // 1.4.0: H1Z1 exited with 0xc00000fd immediately after spawn, while the
       // renderer had already switched to the running state.
       await waitForStableStartup(child);
+      if (!finalized) {
+        try { request.presence?.start(child.pid); } catch { /* Presence is optional. */ }
+      }
       child.unref();
       return child.pid;
     } catch (error) {
