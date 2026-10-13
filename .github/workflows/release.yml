@@ -97,7 +97,7 @@ jobs:
           # previous binary; it prevents the server-supplied module from ever
           # loading by removing rotkc.dll instead (see game-launcher.ts).
           $h = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
-          if ($h.ToUpperInvariant() -ne "672DE2C855A77C23D899D2B4F2801A93053BF8C872366EC2BC14BC0F7CA3AB61") {
+          if ($h.ToUpperInvariant() -ne "5C665126CDC16D8214061BFCD0F95E25A54FAD83597F98B50CC7244C123E15DB") {
             throw "Vivox proxy SHA-256 mismatch: got $h"
           }
 
