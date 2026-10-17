@@ -106,7 +106,7 @@ jobs:
         run: |
           npm run build:gameplay-patch
           $h = (Get-FileHash -LiteralPath "resources\patches\dinput8.dll" -Algorithm SHA256).Hash
-          if ($h.ToUpperInvariant() -ne "50FC571D149ADAC1A86470BA79954EA35F713E2D02C8D88EF2BAF22F326F525A") {
+          if ($h.ToUpperInvariant() -ne "E969DEDBB8F7A130449C5D38FD3E4F6FB34BA61ABFDC3D413F63A069D4A7B36E") {
             throw "Gameplay patch SHA-256 mismatch: got $h"
           }
           npm run build:vivox
