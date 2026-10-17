@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import zipfile
 
-REPO = 'rotk-team/rotk-launcher'
+REPO = 'sinnafuls/rotk-nulled'  # LOCAL EDIT (fork): this repo builds its own releases
 WORKFLOW = '.github/workflows/release.yml'
 
 
