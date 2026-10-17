@@ -20,6 +20,7 @@
 #define CROUCH_MOVE_NODE_ID 6834U
 #define CROUCH_IDLE_NODE_ID 10151U
 #define CROUCH_CONTROL_NODE_ID 20U
+#define CROUCH_VEHICLE_NODE_ID 45U
 #define CROUCH_NODE_TYPE 107U
 #define CROUCH_BLEND_WEIGHT_RVA ((uintptr_t)0x03211fe0U)
 #define CROUCH_SCALE_PITCH_RVA ((uintptr_t)0x012c76b0U)
@@ -377,17 +378,20 @@ static BOOL crouch_read_exact(const void *address,
 
 /*
  * FUN_1431338d0 resolves an input CP from Network::m_nodeBins.  For output pin
- * zero of NodeDef 20 the exact v26 path is:
+ * zero of a float control node the exact v26 path is:
  *
  *   *(network + 0x08)                         node-bin array
- *   *(nodeBins + 0x10 + 20 * 0x28)           output-pin entry array
+ *   *(nodeBins + 0x10 + nodeId * 0x28)       output-pin entry array
  *   *(pinEntry + 0x00)                        AttribDataFloat
- *   *(attrib + 0x10)                          State_Crouching value
+ *   *(attrib + 0x10)                          float control value
  *
  * Reading this binary CP avoids treating out-of-order worker results from the
- * mobile Blend2 as fresh crouch commands.
+ * mobile Blend2 as fresh crouch commands. Node 20 is State_Crouching and
+ * node 45 is Vehicle in the pinned BR1315 graph. Vehicle is zero on foot.
  */
-static BOOL crouch_read_state_control(void *network,
+static BOOL crouch_read_float_control(void *network,
+                                      uint16_t node_id,
+                                      float maximum,
                                       float *value,
                                       uintptr_t *generation,
                                       uintptr_t *control_generation) {
@@ -398,7 +402,7 @@ static BOOL crouch_read_state_control(void *network,
     uintptr_t attrib = 0U;
     float control = 0.0f;
     const uintptr_t pin_offset =
-        0x10U + (uintptr_t)CROUCH_CONTROL_NODE_ID * 0x28U;
+        0x10U + (uintptr_t)node_id * 0x28U;
 
     if (!crouch_read_exact(
             (const uint8_t *)network + 0x08U,
@@ -419,7 +423,7 @@ static BOOL crouch_read_state_control(void *network,
             (const void *)(attrib + 0x10U),
             &control,
             sizeof(control)) ||
-        !(control >= 0.0f && control <= 1.0f) ||
+        !(control >= 0.0f && control <= maximum) ||
         !crouch_read_exact(
             (const uint8_t *)network + 0x08U,
             &confirmed_node_bins,
@@ -440,12 +444,13 @@ static BOOL crouch_read_state_control(void *network,
 
 static BOOL crouch_validate_state_identity(
     void *network,
+    uint16_t node_id,
     uintptr_t generation,
     uintptr_t control_generation) {
     uintptr_t confirmed_generation = 0U;
     uintptr_t confirmed_control_generation = 0U;
     const uintptr_t pin_offset =
-        0x10U + (uintptr_t)CROUCH_CONTROL_NODE_ID * 0x28U;
+        0x10U + (uintptr_t)node_id * 0x28U;
 
     return crouch_read_exact(
                (const uint8_t *)network + 0x08U,
@@ -511,6 +516,7 @@ static uint16_t crouch_blend_weight_hook(
     uint16_t node_id;
     float raw = trajectory_weight;
     float control = 0.0f;
+    float vehicle = 0.0f;
     float output;
     float logged_target = 0.0f;
     float logged_start = 0.0f;
@@ -523,6 +529,8 @@ static uint16_t crouch_blend_weight_hook(
     LARGE_INTEGER now;
     uintptr_t network_generation = 0U;
     uintptr_t control_generation = 0U;
+    uintptr_t vehicle_network_generation = 0U;
+    uintptr_t vehicle_control_generation = 0U;
     int64_t stale_after_ticks;
     crouch_transition_state *state;
     crouch_state_cache_lookup cache_lookup;
@@ -577,11 +585,21 @@ static uint16_t crouch_blend_weight_hook(
             is_additive);
     }
     call_sequence = InterlockedIncrement64(&g_crouch_blend_call_count);
-    if (!crouch_read_state_control(
+    if (!crouch_read_float_control(
             network,
+            CROUCH_CONTROL_NODE_ID,
+            1.0f,
             &control,
             &network_generation,
-            &control_generation)) {
+            &control_generation) ||
+        !crouch_read_float_control(
+            network,
+            CROUCH_VEHICLE_NODE_ID,
+            256.0f,
+            &vehicle,
+            &vehicle_network_generation,
+            &vehicle_control_generation) ||
+        vehicle_network_generation != network_generation) {
         return original(
             attrib_blend_weights,
             node_child_weights,
@@ -597,8 +615,14 @@ static uint16_t crouch_blend_weight_hook(
     AcquireSRWLockExclusive(&g_crouch_state_lock);
     if (!crouch_validate_state_identity(
             network,
+            CROUCH_CONTROL_NODE_ID,
             network_generation,
-            control_generation)) {
+            control_generation) ||
+        !crouch_validate_state_identity(
+            network,
+            CROUCH_VEHICLE_NODE_ID,
+            network_generation,
+            vehicle_control_generation)) {
         ReleaseSRWLockExclusive(&g_crouch_state_lock);
         return original(
             attrib_blend_weights,
@@ -649,6 +673,26 @@ static uint16_t crouch_blend_weight_hook(
                 (void *)network_generation,
                 (void *)control_generation);
         }
+        return original(
+            attrib_blend_weights,
+            node_child_weights,
+            active_node_connections,
+            network,
+            node_def,
+            trajectory_weight,
+            events_weight,
+            sampled_events_weight,
+            sync_events_weight,
+            is_additive);
+    }
+    if (vehicle > 0.0f) {
+        /* C switches pickup seat 2/3 <-> 5/6 without changing the on-foot
+         * State_Crouching CP. OrPickupBed supplies the correct stock pose.
+         * Keep that pose and discard any interrupted on-foot transition so
+         * dismounting cannot resume an obsolete crouch/stand target. */
+        crouch_state_cache_reset(state, network, network_generation,
+            control_generation, now.QuadPart, (int64_t)call_sequence);
+        ReleaseSRWLockExclusive(&g_crouch_state_lock);
         return original(
             attrib_blend_weights,
             node_child_weights,

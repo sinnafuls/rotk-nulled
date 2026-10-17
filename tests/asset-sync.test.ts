@@ -5,15 +5,37 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  ASSET_RELEASE_API_URL,
   AssetSyncService,
-  mergeGitHubReleaseAssets,
   parseAssetManifest,
   stripByteOrderMark,
   type AssetManifest,
   type AssetManifestEntry,
 } from "../electron/services/asset-sync.js";
 import { buildZip } from "./helpers/build-zip.js";
+
+const faults = vi.hoisted(() => ({
+  locked: null as { operation: "copyFile" | "rename"; path: string } | null,
+}));
+// Until released, every copy from or rename onto the locked path fails with
+// EPERM, like a file an antivirus holds for the whole attempt.
+vi.mock("node:fs/promises", async (original) => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  const fault = (operation: "copyFile" | "rename", path: string): NodeJS.ErrnoException | null => {
+    if (faults.locked?.operation !== operation || faults.locked.path !== path) return null;
+    return Object.assign(new Error(`EPERM: operation not permitted, ${operation} '${path}'`), { code: "EPERM" });
+  };
+  return {
+    ...fs,
+    copyFile: (...args: Parameters<typeof fs.copyFile>) => {
+      const failure = fault("copyFile", String(args[0]));
+      return failure ? Promise.reject(failure) : fs.copyFile(...args);
+    },
+    rename: (...args: Parameters<typeof fs.rename>) => {
+      const failure = fault("rename", String(args[1]));
+      return failure ? Promise.reject(failure) : fs.rename(...args);
+    },
+  };
+});
 
 const FEED_URL = "https://raw.githubusercontent.com/rotk/rotk-assets/main/feed.json";
 const INSTALL_MARKER_NAME = ".rotk-installation.json";
@@ -48,25 +70,6 @@ function manifest(assets: AssetManifestEntry[], packVersion = "1.0.0"): AssetMan
   return { manifestVersion: 1, packVersion, assets };
 }
 
-function releaseAsset(name: string, payload: Buffer) {
-  return {
-    name,
-    size: payload.length,
-    digest: "sha256:" + sha256(payload),
-    browser_download_url:
-      "https://github.com/h1z1rotk/assets/releases/download/assets-v1.1.0/" + name,
-  };
-}
-
-function release(assets: ReturnType<typeof releaseAsset>[]) {
-  return {
-    tag_name: "assets-v1.1.0",
-    draft: false,
-    prerelease: false,
-    assets,
-  };
-}
-
 type RouteHandler = () => Response;
 
 function makeFetch(routes: Record<string, RouteHandler>, calls: string[]): typeof fetch {
@@ -84,6 +87,7 @@ describe("ROTK asset sync", () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    faults.locked = null;
     await Promise.all(temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true })));
   });
@@ -105,39 +109,10 @@ describe("ROTK asset sync", () => {
       userDataDirectory: userData,
       feedUrl: FEED_URL,
       fetchImpl: makeFetch(routes, calls),
-      discoverReleaseAssets: false,
     });
   }
 
-  it("starts both metadata requests before either responds and waits for both before installing", async () => {
-    const { userData, root } = await setup();
-    const requests = new Map<string, (response: Response) => void>();
-    const sync = new AssetSyncService({ userDataDirectory: userData, feedUrl: FEED_URL,
-      fetchImpl: (async input => new Promise<Response>(resolve => requests.set(String(input), resolve))) as typeof fetch });
-    const pending = sync.sync(root);
-    await vi.waitFor(() => expect(requests.size).toBe(2));
-    requests.get(FEED_URL)!(new Response(JSON.stringify(manifest([]))));
-    expect(await sync.readState()).toBeNull();
-    requests.get(ASSET_RELEASE_API_URL)!(new Response(JSON.stringify(release([]))));
-    expect((await pending).status).toBe("updated");
-  });
-
-  it.each([FEED_URL, ASSET_RELEASE_API_URL])("aborts the other metadata read when %s is invalid", async failedUrl => {
-    const { userData, root } = await setup();
-    let cancelled = false;
-    const sync = new AssetSyncService({ userDataDirectory: userData, feedUrl: FEED_URL,
-      fetchImpl: (async (input, init) => {
-        if (String(input) === failedUrl) return new Response("invalid-json");
-        return new Promise<Response>((_resolve, reject) => {
-          init!.signal!.addEventListener("abort", () => { cancelled = true; reject(new Error("cancelled peer")); }, { once: true });
-        });
-      }) as typeof fetch });
-    await expect(sync.sync(root)).rejects.toThrow();
-    expect(cancelled).toBe(true);
-    expect(await sync.readState()).toBeNull();
-  });
-
-  it("propagates cancellation to both metadata reads", async () => {
+  it("propagates cancellation to the feed read", async () => {
     const { userData, root } = await setup();
     const controller = new AbortController();
     let started = 0, cancelled = 0;
@@ -147,10 +122,10 @@ describe("ROTK asset sync", () => {
         init!.signal!.addEventListener("abort", () => { cancelled++; reject(new Error("cancelled")); }, { once: true });
       })) as typeof fetch });
     const pending = expect(sync.sync(root, { signal: controller.signal })).rejects.toThrow();
-    await vi.waitFor(() => expect(started).toBe(2));
+    await vi.waitFor(() => expect(started).toBe(1));
     controller.abort();
     await pending;
-    expect(cancelled).toBe(2);
+    expect(cancelled).toBe(1);
   });
 
   it.each([false, true])("uses one timeout budget and respects an already-aborted signal (preaborted=%s)", async preaborted => {
@@ -159,24 +134,24 @@ describe("ROTK asset sync", () => {
     const controller = new AbortController();
     if (preaborted) controller.abort();
     let markStarted!: () => void;
-    const bothStarted = new Promise<void>(resolve => { markStarted = resolve; });
+    const feedStarted = new Promise<void>(resolve => { markStarted = resolve; });
     let started = 0, cancelled = 0;
     const sync = new AssetSyncService({ userDataDirectory: userData, feedUrl: FEED_URL,
       fetchImpl: (async (_input, init) => new Promise<Response>((_resolve, reject) => {
-        if (++started === 2) markStarted();
+        if (++started === 1) markStarted();
         const abort = () => { cancelled++; reject(new Error("cancelled")); };
         if (init!.signal!.aborted) abort();
         else init!.signal!.addEventListener("abort", abort, { once: true });
       })) as typeof fetch });
     const pending = expect(sync.sync(root, { signal: controller.signal })).rejects.toThrow();
-    await bothStarted;
+    await feedStarted;
     if (!preaborted) {
       await vi.advanceTimersByTimeAsync(9999);
       expect(cancelled).toBe(0);
       await vi.advanceTimersByTimeAsync(1);
     }
     await pending;
-    expect(cancelled).toBe(2);
+    expect(cancelled).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -241,112 +216,6 @@ describe("ROTK asset sync", () => {
       expect(() => parseAssetManifest(withEntry({ size: 4 * 1024 ** 4 }))).toThrow("taille invalide");
     });
 
-    it("discovers new pack ZIPs from the latest GitHub release", () => {
-      const oldPack = Buffer.from("old pack");
-      const updatedPackZip = Buffer.from("updated pack zip");
-      const movementPackZip = Buffer.from("movement pack zip");
-      const feed = manifest([
-        assetEntry("assets_x64_0", oldPack, {
-          type: "zip",
-          installPath: "Resources/Assets",
-        }),
-      ]);
-
-      const merged = mergeGitHubReleaseAssets(feed, release([
-        releaseAsset("assets_x64_0.zip", updatedPackZip),
-        releaseAsset("assets_x64_10.zip", movementPackZip),
-        releaseAsset("release-notes.txt", Buffer.from("ignored")),
-      ]));
-
-      expect(merged.packVersion).toBe("1.1.0");
-      expect(merged.assets.map((asset) => asset.name)).toEqual([
-        "assets_x64_0",
-        "assets_x64_10",
-      ]);
-      expect(merged.assets[0]).toMatchObject({
-        sha256: sha256(updatedPackZip),
-        releasePackEntry: "assets_x64_0.pack2",
-      });
-      expect(merged.assets[1]).toMatchObject({
-        url: "https://github.com/h1z1rotk/assets/releases/download/assets-v1.1.0/assets_x64_10.zip",
-        sha256: sha256(movementPackZip),
-        installPath: "Resources/Assets",
-        releasePackEntry: "assets_x64_10.pack2",
-      });
-    });
-
-    it("accepts release ZIPs under the ROTK-Team owner and refuses other owners", () => {
-      const pack = Buffer.from("pack");
-      const moved = releaseAsset("assets_x64_10.zip", pack);
-      moved.browser_download_url = moved.browser_download_url.replace("/h1z1rotk/", "/ROTK-Team/");
-      expect(mergeGitHubReleaseAssets(manifest([]), release([moved])).assets[0].url)
-        .toBe("https://github.com/ROTK-Team/assets/releases/download/assets-v1.1.0/assets_x64_10.zip");
-
-      const foreign = { ...moved, browser_download_url: moved.browser_download_url.replace("/ROTK-Team/", "/someone/") };
-      expect(() => mergeGitHubReleaseAssets(manifest([]), release([foreign])))
-        .toThrow("URL GitHub inattendue");
-    });
-
-    it("refuses an auto-discovered ZIP without GitHub SHA-256 metadata", () => {
-      const candidate = {
-        ...releaseAsset("assets_x64_10.zip", Buffer.from("pack")),
-        digest: null,
-      };
-      expect(() => mergeGitHubReleaseAssets(manifest([]), release([candidate as never])))
-        .toThrow("empreinte GitHub absente");
-    });
-  });
-
-  it("downloads a newly uploaded release pack before launch or Verify files", async () => {
-    const { userData, root } = await setup();
-    const packZip = buildZip([
-      { name: "assets_x64_10.pack2", data: "PS3 movement animations", method: 8 },
-    ]);
-    const metadata = release([releaseAsset("assets_x64_10.zip", packZip)]);
-    const downloadUrl = metadata.assets[0].browser_download_url;
-    const calls: string[] = [];
-    const sync = new AssetSyncService({
-      userDataDirectory: userData,
-      feedUrl: FEED_URL,
-      releaseApiUrl: ASSET_RELEASE_API_URL,
-      fetchImpl: makeFetch({
-        [FEED_URL]: () => new Response(JSON.stringify(manifest([]))),
-        [ASSET_RELEASE_API_URL]: () => new Response(JSON.stringify(metadata)),
-        [downloadUrl]: () => new Response(new Uint8Array(packZip)),
-      }, calls),
-    });
-
-    expect(await sync.sync(root)).toEqual({ status: "updated", packVersion: "1.1.0" });
-    expect(
-      await readFile(join(root, "Resources", "Assets", "assets_x64_10.pack2"), "utf8"),
-    ).toBe("PS3 movement animations");
-    expect(calls).toEqual([FEED_URL, ASSET_RELEASE_API_URL, downloadUrl]);
-    expect((await sync.readState())?.assets[0]).toMatchObject({
-      name: "assets_x64_10",
-      sha256: sha256(packZip),
-    });
-  });
-
-  it("rejects a release ZIP whose pack name does not match its asset name", async () => {
-    const { userData, root } = await setup();
-    const wrongZip = buildZip([{ name: "another.pack2", data: "wrong" }]);
-    const metadata = release([releaseAsset("assets_x64_10.zip", wrongZip)]);
-    const downloadUrl = metadata.assets[0].browser_download_url;
-    const sync = new AssetSyncService({
-      userDataDirectory: userData,
-      feedUrl: FEED_URL,
-      releaseApiUrl: ASSET_RELEASE_API_URL,
-      fetchImpl: makeFetch({
-        [FEED_URL]: () => new Response(JSON.stringify(manifest([]))),
-        [ASSET_RELEASE_API_URL]: () => new Response(JSON.stringify(metadata)),
-        [downloadUrl]: () => new Response(new Uint8Array(wrongZip)),
-      }, []),
-    });
-
-    await expect(sync.verify(root)).rejects.toThrow("doit contenir uniquement assets_x64_10.pack2");
-    await expect(
-      stat(join(root, "Resources", "Assets", "another.pack2")),
-    ).rejects.toThrow();
   });
 
   it("restores backups made by older launchers and drops their C: cache", async () => {
@@ -427,6 +296,132 @@ describe("ROTK asset sync", () => {
     await expect(stat(join(userData, "asset-cache"))).rejects.toThrow();
     expect(await readFile(join(assetStorage(root), "asset-backups", "data", "other.pack"), "utf8")).toBe("vanilla other");
     await expect(stat(join(userData, "asset-backups"))).rejects.toThrow();
+  });
+
+  it("resumes a partial download with a Range request", async () => {
+    const { userData, root } = await setup();
+    const payload = Buffer.from("0123456789".repeat(100));
+    const entry = assetEntry("big.pack", payload, { installPath: "data/big.pack" });
+    const cacheDirectory = join(assetStorage(root), "asset-cache");
+    await mkdir(cacheDirectory, { recursive: true });
+    await writeFile(join(cacheDirectory, `${entry.sha256}.pack.part`), payload.subarray(0, 400));
+    const ranges: Array<string | null> = [];
+    const sync = new AssetSyncService({
+      userDataDirectory: userData,
+      feedUrl: FEED_URL,
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === FEED_URL) return new Response(JSON.stringify(manifest([entry])));
+        const range = new Headers(init?.headers).get("range");
+        ranges.push(range);
+        if (range !== "bytes=400-") return new Response(new Uint8Array(payload));
+        return new Response(new Uint8Array(payload.subarray(400)), {
+          status: 206,
+          headers: { "content-range": `bytes 400-999/${payload.length}` },
+        });
+      }) as typeof fetch,
+    });
+
+    await sync.sync(root);
+    expect(ranges).toEqual(["bytes=400-"]);
+    expect(await readFile(join(root, "data", "big.pack"))).toEqual(payload);
+  });
+
+  it("restarts a corrupt resumed download without overcounting progress", async () => {
+    const { userData, root } = await setup();
+    const payload = Buffer.from("0123456789".repeat(100));
+    const entry = assetEntry("big.pack", payload, { installPath: "data/big.pack" });
+    const cacheDirectory = join(assetStorage(root), "asset-cache");
+    await mkdir(cacheDirectory, { recursive: true });
+    await writeFile(join(cacheDirectory, `${entry.sha256}.pack.part`), Buffer.alloc(400, 0x78));
+    const ranges: Array<string | null> = [];
+    const progress: Array<{ completedBytes: number; totalBytes: number }> = [];
+    const sync = new AssetSyncService({
+      userDataDirectory: userData,
+      feedUrl: FEED_URL,
+      onProgress: (event) => progress.push(event),
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === FEED_URL) return new Response(JSON.stringify(manifest([entry])));
+        const range = new Headers(init?.headers).get("range");
+        ranges.push(range);
+        if (range !== "bytes=400-") return new Response(new Uint8Array(payload));
+        return new Response(new Uint8Array(payload.subarray(400)), {
+          status: 206,
+          headers: { "content-range": `bytes 400-999/${payload.length}` },
+        });
+      }) as typeof fetch,
+    });
+
+    await sync.sync(root);
+    expect(ranges).toEqual(["bytes=400-", null]);
+    expect(await readFile(join(root, "data", "big.pack"))).toEqual(payload);
+    expect(Math.max(...progress.map((event) => event.completedBytes))).toBe(payload.length);
+    expect(progress.every((event) => event.completedBytes <= event.totalBytes)).toBe(true);
+  });
+
+  it("drops a partial answer for another offset and retries without Range", async () => {
+    const { userData, root } = await setup();
+    const payload = Buffer.from("0123456789".repeat(100));
+    const entry = assetEntry("big.pack", payload, { installPath: "data/big.pack" });
+    const cacheDirectory = join(assetStorage(root), "asset-cache");
+    await mkdir(cacheDirectory, { recursive: true });
+    await writeFile(join(cacheDirectory, `${entry.sha256}.pack.part`), payload.subarray(0, 400));
+    const ranges: Array<string | null> = [];
+    const sync = new AssetSyncService({
+      userDataDirectory: userData,
+      feedUrl: FEED_URL,
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === FEED_URL) return new Response(JSON.stringify(manifest([entry])));
+        const range = new Headers(init?.headers).get("range");
+        ranges.push(range);
+        if (range === null) return new Response(new Uint8Array(payload));
+        return new Response(new Uint8Array(payload.subarray(0, 600)), {
+          status: 206,
+          headers: { "content-range": `bytes 0-599/${payload.length}` },
+        });
+      }) as typeof fetch,
+    });
+
+    await sync.sync(root);
+    expect(ranges).toEqual(["bytes=400-", null]);
+    expect(await readFile(join(root, "data", "big.pack"))).toEqual(payload);
+  });
+
+  it("retries a download after a server error", async () => {
+    const { userData, root } = await setup();
+    const payload = Buffer.from("custom sounds");
+    const entry = assetEntry("sounds.pack", payload);
+    let downloads = 0;
+    const sync = new AssetSyncService({
+      userDataDirectory: userData,
+      feedUrl: FEED_URL,
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        if (String(input) === FEED_URL) return new Response(JSON.stringify(manifest([entry])));
+        downloads += 1;
+        return downloads === 1 ? new Response("busy", { status: 503 }) : new Response(new Uint8Array(payload));
+      }) as typeof fetch,
+    });
+
+    await sync.sync(root);
+    expect(downloads).toBe(2);
+    await expect(readFile(join(root, "sounds.pack"), "utf8")).resolves.toBe("custom sounds");
+  });
+
+  it("does not retry a missing asset", async () => {
+    const { userData, root } = await setup();
+    const entry = assetEntry("gone.pack", Buffer.from("x"));
+    let downloads = 0;
+    const sync = new AssetSyncService({
+      userDataDirectory: userData,
+      feedUrl: FEED_URL,
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        if (String(input) === FEED_URL) return new Response(JSON.stringify(manifest([entry])));
+        downloads += 1;
+        return new Response("not found", { status: 404 });
+      }) as typeof fetch,
+    });
+
+    await expect(sync.sync(root)).rejects.toThrow(/HTTP 404/);
+    expect(downloads).toBe(1);
   });
 
   it("installs file and zip assets, backs up originals and keeps state", async () => {
@@ -662,5 +657,137 @@ describe("ROTK asset sync", () => {
     await expect(stat(join(root, "added.pack"))).rejects.toThrow();
     expect(await sync.readState()).toBeNull();
     await expect(stat(join(assetStorage(root), "asset-backups"))).rejects.toThrow();
+  });
+
+  it("restore() retried after an interrupted pass keeps every restored original", async () => {
+    const { userData, root } = await setup();
+    await writeFile(join(root, "first.pack"), "vanilla first");
+    await writeFile(join(root, "second.pack"), "vanilla second");
+    const first = Buffer.from("custom first");
+    const second = Buffer.from("custom second");
+    const added = Buffer.from("brand new");
+    const feed = manifest([
+      assetEntry("first", first, { installPath: "first.pack" }),
+      assetEntry("second", second, { installPath: "second.pack" }),
+      assetEntry("added", added, { installPath: "added.pack" }),
+    ]);
+    const sync = service(userData, {
+      [FEED_URL]: () => new Response(JSON.stringify(feed)),
+      [feed.assets[0].url]: () => new Response(first),
+      [feed.assets[1].url]: () => new Response(second),
+      [feed.assets[2].url]: () => new Response(added),
+    });
+    await sync.sync(root);
+
+    // A locked second file stops the first attempt after the first file is back.
+    faults.locked = { operation: "rename", path: join(root, "second.pack") };
+    await expect(sync.restore(root)).rejects.toMatchObject({ code: "EPERM" });
+    faults.locked = null;
+    expect(await readFile(join(root, "first.pack"), "utf8")).toBe("vanilla first");
+    expect(await readFile(join(root, "second.pack"), "utf8")).toBe("custom second");
+    expect(await sync.readState()).not.toBeNull();
+
+    await sync.restore(root);
+    expect(await readFile(join(root, "first.pack"), "utf8")).toBe("vanilla first");
+    expect(await readFile(join(root, "second.pack"), "utf8")).toBe("vanilla second");
+    expect((await readdir(root)).sort()).toEqual([INSTALL_MARKER_NAME, "first.pack", "second.pack"]);
+    expect(await sync.readState()).toBeNull();
+    await expect(stat(join(assetStorage(root), "asset-backups"))).rejects.toThrow();
+  });
+
+  it("keeps the backups of a dropped asset until the state without it is written", async () => {
+    const { userData, root } = await setup();
+    await writeFile(join(root, "first.pack"), "vanilla first");
+    await writeFile(join(root, "second.pack"), "vanilla second");
+    const zipPayload = buildZip([
+      { name: "first.pack", data: "custom first", method: 8 },
+      { name: "second.pack", data: "custom second", method: 8 },
+    ]);
+    const feedV1 = manifest([assetEntry("overlay", zipPayload, { type: "zip", installPath: "." })]);
+    await service(userData, {
+      [FEED_URL]: () => new Response(JSON.stringify(feedV1)),
+      [feedV1.assets[0].url]: () => new Response(new Uint8Array(zipPayload)),
+    }).sync(root);
+
+    const backups = join(assetStorage(root), "asset-backups");
+    const sync = service(userData, {
+      [FEED_URL]: () => new Response(JSON.stringify(manifest([], "2.0.0"))),
+    });
+    // Reading the second backup fails, after the first file is back.
+    faults.locked = { operation: "copyFile", path: join(backups, "second.pack") };
+    await expect(sync.sync(root)).rejects.toMatchObject({ code: "EPERM" });
+    faults.locked = null;
+    expect(await readFile(join(root, "first.pack"), "utf8")).toBe("vanilla first");
+    expect(await readFile(join(root, "second.pack"), "utf8")).toBe("custom second");
+    expect((await sync.readState())?.packVersion).toBe("1.0.0");
+
+    // Writing the new state fails: the previous state still lists both files,
+    // so both backups must survive.
+    faults.locked = { operation: "rename", path: join(userData, "asset-state.v1.json") };
+    await expect(sync.sync(root)).rejects.toMatchObject({ code: "EPERM" });
+    faults.locked = null;
+    expect(await readFile(join(root, "first.pack"), "utf8")).toBe("vanilla first");
+    expect(await readFile(join(root, "second.pack"), "utf8")).toBe("vanilla second");
+    expect((await sync.readState())?.packVersion).toBe("1.0.0");
+    expect(await readFile(join(backups, "first.pack"), "utf8")).toBe("vanilla first");
+    expect(await readFile(join(backups, "second.pack"), "utf8")).toBe("vanilla second");
+
+    expect(await sync.sync(root)).toEqual({ status: "updated", packVersion: "2.0.0" });
+    expect(await readFile(join(root, "first.pack"), "utf8")).toBe("vanilla first");
+    expect(await readFile(join(root, "second.pack"), "utf8")).toBe("vanilla second");
+    expect((await sync.readState())?.assets).toEqual([]);
+    expect(await readdir(backups)).toEqual([]);
+  });
+
+  it("a normal removal deletes only the backups of the files it restored", async () => {
+    const { userData, root } = await setup();
+    await writeFile(join(root, "kept.pack"), "vanilla kept");
+    await writeFile(join(root, "dropped.pack"), "vanilla dropped");
+    const kept = Buffer.from("custom kept");
+    const dropped = Buffer.from("custom dropped");
+    const feedV1 = manifest([
+      assetEntry("kept", kept, { installPath: "kept.pack" }),
+      assetEntry("dropped", dropped, { installPath: "dropped.pack" }),
+    ]);
+    await service(userData, {
+      [FEED_URL]: () => new Response(JSON.stringify(feedV1)),
+      [feedV1.assets[0].url]: () => new Response(kept),
+      [feedV1.assets[1].url]: () => new Response(dropped),
+    }).sync(root);
+
+    const sync = service(userData, {
+      [FEED_URL]: () => new Response(JSON.stringify(manifest([feedV1.assets[0]], "2.0.0"))),
+    });
+    expect(await sync.sync(root)).toEqual({ status: "updated", packVersion: "2.0.0" });
+    expect(await readFile(join(root, "dropped.pack"), "utf8")).toBe("vanilla dropped");
+    expect(await readFile(join(root, "kept.pack"), "utf8")).toBe("custom kept");
+    expect(await readdir(join(assetStorage(root), "asset-backups"))).toEqual(["kept.pack"]);
+
+    await sync.restore(root);
+    expect(await readFile(join(root, "kept.pack"), "utf8")).toBe("vanilla kept");
+    expect(await sync.readState()).toBeNull();
+    await expect(stat(join(assetStorage(root), "asset-backups"))).rejects.toThrow();
+  });
+
+  it("drops a backup left in the old userData folder once the state without it is written", async () => {
+    const { userData, root } = await setup();
+    await writeFile(join(root, "sounds.pack"), "custom sounds");
+    await mkdir(join(userData, "asset-backups"), { recursive: true });
+    await writeFile(join(userData, "asset-backups", "sounds.pack"), "vanilla sounds");
+    await writeFile(join(userData, "asset-state.v1.json"), JSON.stringify({
+      schemaVersion: 1, packVersion: "0.9.0", syncedAt: "2026-09-01T00:00:00Z",
+      assets: [{
+        name: "rotk-sounds", version: "0.9.0", sha256: sha256("custom sounds"),
+        installedFiles: [{ path: "sounds.pack", sha256: sha256("custom sounds"), size: 13 }],
+      }],
+    }));
+
+    // The old backup cannot be moved next to the install, so it is restored in place.
+    faults.locked = { operation: "rename", path: join(assetStorage(root), "asset-backups", "sounds.pack") };
+    const sync = service(userData, { [FEED_URL]: () => new Response(JSON.stringify(manifest([]))) });
+    expect(await sync.sync(root)).toEqual({ status: "updated", packVersion: "1.0.0" });
+    expect(await readFile(join(root, "sounds.pack"), "utf8")).toBe("vanilla sounds");
+    expect((await sync.readState())?.assets).toEqual([]);
+    await expect(stat(join(userData, "asset-backups", "sounds.pack"))).rejects.toThrow();
   });
 });

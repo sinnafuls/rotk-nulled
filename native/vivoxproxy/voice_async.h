@@ -6,13 +6,14 @@
 #define VOICE_ROOM_LIMIT 16U
 #define VOICE_RECOVERY_MS 20000U
 #define VOICE_ATTEMPT_MS 4000U
+#define VOICE_RETRY_COOLDOWN_MS 5000U
 static void compat_begin_login_epoch(void);
 typedef int (__cdecl *voice_parse_response_fn)(const char *, void **, char **);
 typedef int (__cdecl *voice_destroy_fn)(void *);
 typedef struct voice_room {
     BOOL occupied, desired, exhausted, accepted, media_failed, removed, wake_announced;
     uint64_t generation, epoch;
-    ULONGLONG rejoin_after;
+    ULONGLONG rejoin_after, retry_after;
     unsigned rejoins;
     int connect_audio, connect_text;
     BOOL restore_audio, has_mute, has_volume;
@@ -23,10 +24,12 @@ typedef struct voice_room {
 typedef enum voice_job_phase { VOICE_EMPTY, VOICE_WAITING, VOICE_FETCHING, VOICE_READY, VOICE_ISSUED } voice_job_phase;
 typedef struct voice_job {
     voice_job_phase phase;
-    BOOL cancelled, valid, internal, notified;
+    BOOL cancelled, valid, internal, notified, retryable;
     uint32_t type;
     uint64_t serial, epoch, generation;
     unsigned room, attempts;
+    DWORD http_status;
+    BOOL transport_failure;
     ULONGLONG until, next;
     void *request, *failure;
     WCHAR channel[64];
@@ -44,6 +47,7 @@ static uint64_t g_async_serial, g_room_generation;
 static LONG g_sdk_outstanding;
 static LONG g_media_trace_count;
 static BOOL g_login_signature_set;
+static ULONGLONG g_login_retry_after;
 static char g_login_signature[GRANT_TOKEN_MAX + 1U];
 static voice_parse_response_fn g_async_parse;
 static voice_destroy_fn g_async_destroy_request, g_async_destroy_response;
@@ -101,12 +105,14 @@ static BOOL voice_async_duplicate_login(void *request) {
     read_pointer(request, LOGIN_TOKEN_OFFSET, &token);
     if (!bounded_string(token, GRANT_TOKEN_MAX, &bytes)) return FALSE;
     AcquireSRWLockShared(&g_async_lock);
-    BOOL duplicate = g_login_signature_set && strcmp(token, g_login_signature) == 0;
+    BOOL duplicate = g_login_signature_set && strcmp(token, g_login_signature) == 0 &&
+        (g_login_retry_after == 0U || GetTickCount64() < g_login_retry_after);
     ReleaseSRWLockShared(&g_async_lock); return duplicate;
 }
 static void voice_async_reset_login_signature(void) {
     AcquireSRWLockExclusive(&g_async_lock);
-    g_login_signature_set = FALSE; SecureZeroMemory(g_login_signature, sizeof(g_login_signature));
+    g_login_signature_set = FALSE; g_login_retry_after = 0U;
+    SecureZeroMemory(g_login_signature, sizeof(g_login_signature));
     ReleaseSRWLockExclusive(&g_async_lock);
 }
 static unsigned voice_pending_locked(void) {
@@ -155,7 +161,16 @@ static BOOL voice_current_locked(const voice_job *job) {
     return room->desired && room->generation == job->generation && room->epoch == job->epoch;
 }
 static BOOL voice_retryable(DWORD status) {
-    return status == 0U || status == 401U || status == 409U || status == 429U || status == 503U;
+    return status == 0U || status == 401U || status == 409U || status == 429U ||
+        status == 500U || status == 502U || status == 503U || status == 504U;
+}
+static BOOL voice_sdk_retryable(int status) {
+    /* Documented network/timeouts, excluding invalid arguments and VAT signatures. */
+    return status == 408 || status == 480 || status == 486 || status == 503 ||
+        status == 1058 || status == 1095 || status == 5003 || status == 5020 ||
+        status == 5024 || status == 5043 || status == 5045 || status == 5050 ||
+        status == 10006 || status == 10007 || status == 10028 || status == 10056 || status == 10100 ||
+        status == 20127; /* VAT service unavailable: a new episode still requires a fresh grant. */
 }
 static DWORD WINAPI voice_network_worker(void *unused) {
     (void)unused;
@@ -175,7 +190,9 @@ static DWORD WINAPI voice_network_worker(void *unused) {
             voice_job *job = &g_async_jobs[i];
             if (job->phase != VOICE_WAITING) continue;
             if (!voice_current_locked(job) || now >= job->until) {
-                job->cancelled = TRUE; job->phase = VOICE_READY; continue;
+                job->cancelled = !voice_current_locked(job);
+                if (!job->cancelled) job->retryable = TRUE;
+                job->phase = VOICE_READY; continue;
             }
             if (job->next <= now) {
                 if (selected == VOICE_ASYNC_LIMIT || job->next < g_async_jobs[selected].next) selected = i;
@@ -193,23 +210,31 @@ static DWORD WINAPI voice_network_worker(void *unused) {
         if (room_ready && g_voice_notify != NULL) g_voice_notify(g_voice_notify_cookie);
         if (selected == VOICE_ASYNC_LIMIT) { WaitForSingleObject(g_async_wake, wait); continue; }
         DWORD status = 0U, retry = 0U;
+        BOOL transport_failure = FALSE;
         DWORD budget = work.until - now < VOICE_ATTEMPT_MS ? (DWORD)(work.until - now) : VOICE_ATTEMPT_MS;
-        BOOL valid = fetch_grant_result(action_for_type(work.type), work.channel, &work.grant, budget, &status, &retry);
+        BOOL valid = fetch_grant_result(action_for_type(work.type), work.channel, &work.grant, budget, &status, &retry, &transport_failure);
         now = GetTickCount64();
         AcquireSRWLockExclusive(&g_async_lock);
         voice_job *job = &g_async_jobs[selected];
         if (job->serial == work.serial && job->phase == VOICE_FETCHING) {
             ++job->attempts;
-            DWORD delay = (500U + (DWORD)(job->serial % 251U)) << (job->attempts - 1U);
+            job->http_status = status; job->transport_failure = transport_failure;
+            /* Cap backoff, not attempts: quick 409s must not end a 20s recovery at 3.5s. */
+            unsigned shift = job->attempts > 4U ? 3U : job->attempts - 1U;
+            DWORD delay = (500U + (DWORD)(job->serial % 251U)) << shift;
+            if (delay > 4000U) delay = 4000U;
             if (retry > delay) delay = retry;
+            job->retryable = (valid && now >= job->until) || (!valid && (voice_retryable(status) || transport_failure));
+            if (job->retryable) job->next = now + delay;
             if (voice_current_locked(job) && valid && now < job->until) {
                 job->grant = work.grant; job->valid = TRUE; job->phase = VOICE_READY;
-            } else if (voice_current_locked(job) && voice_retryable(status) && !valid &&
-                       job->attempts < 4U && now + delay < job->until) {
+            } else if (voice_current_locked(job) && job->retryable &&
+                       now + delay < job->until) {
                 job->next = now + delay; job->phase = VOICE_WAITING;
             } else {
                 job->phase = VOICE_READY;
-                if (job->type != REQUEST_LOGIN && voice_current_locked(job)) g_voice_rooms[job->room].exhausted = TRUE;
+                if (job->type != REQUEST_LOGIN && voice_current_locked(job))
+                    g_voice_rooms[job->room].exhausted = !job->retryable;
             }
         }
         BOOL ready = job->phase == VOICE_READY;
@@ -258,7 +283,7 @@ static int voice_async_enqueue(void *request, uint32_t type, int *count, uint64_
         const voice_job *job = &g_async_jobs[i];
         if (job->phase == VOICE_EMPTY && slot == VOICE_ASYNC_LIMIT) slot = i;
         if (job->phase != VOICE_EMPTY && !job->cancelled &&
-            (job->request == request || (job->type == type && wcscmp(job->channel, channel) == 0))) {
+            (job->request == request || ((job->type == type || (job->type != REQUEST_LOGIN && type != REQUEST_LOGIN)) && wcscmp(job->channel, channel) == 0))) {
             ReleaseSRWLockExclusive(&g_async_lock); return VOICE_ERROR;
         }
     }
@@ -270,6 +295,7 @@ static int voice_async_enqueue(void *request, uint32_t type, int *count, uint64_
         if (room_index == VOICE_ROOM_LIMIT ||
             (recovery_generation != 0U && (!g_voice_rooms[room_index].desired || g_voice_rooms[room_index].generation != recovery_generation)) ||
             (g_voice_rooms[room_index].desired && (g_voice_rooms[room_index].exhausted ||
+                GetTickCount64() < g_voice_rooms[room_index].retry_after ||
                 (recovery_generation == 0U && g_voice_rooms[room_index].accepted)))) {
             ReleaseSRWLockExclusive(&g_async_lock); return VOICE_ERROR;
         }
@@ -292,6 +318,7 @@ static int voice_async_enqueue(void *request, uint32_t type, int *count, uint64_
         if (bounded_string(token, GRANT_TOKEN_MAX, &bytes)) {
             SecureZeroMemory(g_login_signature, sizeof(g_login_signature));
             memcpy(g_login_signature, token, bytes + 1U); g_login_signature_set = TRUE;
+            g_login_retry_after = 0U;
         }
     }
     if (type != REQUEST_LOGIN) {
@@ -301,6 +328,7 @@ static int voice_async_enqueue(void *request, uint32_t type, int *count, uint64_
             room->epoch = epoch; room->generation = ++g_room_generation; wcscpy(room->channel, channel);
         }
         job->generation = room->generation;
+        room->retry_after = 0U;
         if (job->internal) memcpy(job->retained_handle, room->handle, sizeof(job->retained_handle));
         char *group = NULL; size_t length;
         read_pointer(request, type == REQUEST_SESSIONGROUP_ADD ? 0x30U : 0x78U, &group);
@@ -368,6 +396,7 @@ static void *voice_async_poll(void) {
     AcquireSRWLockExclusive(&g_async_lock);
     for (unsigned i = 0; i < VOICE_ASYNC_LIMIT; ++i) if (g_async_jobs[i].phase == VOICE_READY) {
         slot = i; work = g_async_jobs[i];
+        if (work.valid && voice_current_locked(&work) && GetTickCount64() >= work.until) work.retryable = TRUE;
         work.valid = work.valid && voice_current_locked(&work) && GetTickCount64() < work.until;
         g_async_jobs[i].phase = VOICE_ISSUED; g_async_jobs[i].failure = NULL; break;
     }
@@ -375,6 +404,7 @@ static void *voice_async_poll(void) {
     if (slot == VOICE_ASYNC_LIMIT) return NULL;
     BOOL mutated = FALSE;
     AcquireSRWLockExclusive(&g_voice_lock);
+    if (work.valid && work.epoch == g_login_epoch && work.grant.expires <= unix_time_seconds()) work.retryable = TRUE;
     if (work.valid && work.epoch == g_login_epoch && work.grant.expires > unix_time_seconds()) {
         if (work.type == REQUEST_LOGIN) mutated = mutate_login(work.request, &work.grant);
         else if (work.type == REQUEST_SESSION) mutated = mutate_join(work.request, SESSION_REQUEST_BYTES, SESSION_URI_OFFSET, SESSION_TOKEN_OFFSET, &work.grant);
@@ -393,7 +423,10 @@ static void *voice_async_poll(void) {
     ReleaseSRWLockExclusive(&g_voice_lock);
     void *none = NULL;
     memcpy((char *)work.failure + RESPONSE_REQUEST_OFFSET, &none, sizeof(none));
+    ULONGLONG now = GetTickCount64(), retry_at = now + VOICE_RETRY_COOLDOWN_MS;
+    if (work.retryable && work.next > retry_at) retry_at = work.next;
     int count = 0, issued = mutated ? g_issue_request(work.request, &count) : VOICE_ERROR;
+    if (mutated && voice_sdk_retryable(issued)) work.retryable = TRUE;
     if (issued == 0) {
         InterlockedExchange(&g_sdk_outstanding, count);
         g_async_destroy_response(work.failure);
@@ -405,11 +438,34 @@ static void *voice_async_poll(void) {
     } else {
         memcpy((char *)work.failure + RESPONSE_REQUEST_OFFSET, &work.request, sizeof(work.request));
         AcquireSRWLockExclusive(&g_async_lock);
-        if (work.type != REQUEST_LOGIN && voice_current_locked(&work)) g_voice_rooms[work.room].exhausted = TRUE;
+        if (g_async_jobs[slot].serial == work.serial && voice_current_locked(&g_async_jobs[slot])) {
+            if (work.type == REQUEST_LOGIN) {
+                if (work.retryable) g_login_retry_after = retry_at;
+            } else {
+                voice_room *room = &g_voice_rooms[work.room];
+                room->exhausted = !work.retryable;
+                if (work.retryable) {
+                    room->retry_after = retry_at;
+                    if (work.internal) {
+                        room->media_failed = room->removed = TRUE;
+                        room->rejoin_after = retry_at > now + 10000U ? retry_at : now + 10000U;
+                        room->wake_announced = FALSE;
+                        if (g_async_wake != NULL) SetEvent(g_async_wake);
+                    }
+                }
+            }
+        }
         if (g_async_jobs[slot].serial == work.serial) SecureZeroMemory(&g_async_jobs[slot], sizeof(voice_job));
         ReleaseSRWLockExclusive(&g_async_lock);
     }
     void *failure = work.failure;
+    if (failure != NULL && !work.cancelled) {
+        char line[160]; snprintf(line, sizeof(line),
+            "[rotk-vivoxproxy] recovery: type=0x%x attempts=%u http=%lu transport=%u sdk=%d retryable=%u cooldown_ms=%u",
+            (unsigned)work.type, work.attempts, (unsigned long)work.http_status, (unsigned)work.transport_failure, issued, (unsigned)work.retryable,
+            work.retryable ? (unsigned)(retry_at - now) : 0U);
+        proxy_trace_line(line);
+    }
     if (work.internal && failure != NULL) { g_async_destroy_response(failure); failure = NULL; }
     SecureZeroMemory(&work, sizeof(work)); return failure;
 }
@@ -417,10 +473,11 @@ static BOOL voice_async_observe_response(void *message) {
     uint32_t kind; if (!request_is_accessible(message, 0x40U, FALSE)) return FALSE;
     memcpy(&kind, message, 4U); if (kind != VIVOX_MESSAGE_RESPONSE) return FALSE;
     void *request = NULL; memcpy(&request, (char *)message + RESPONSE_REQUEST_OFFSET, sizeof(request));
-    BOOL internal = FALSE;
+    BOOL internal = FALSE, failed = FALSE, retryable = FALSE;
+    int32_t sdk_status = 0; uint32_t request_type = 0U;
     AcquireSRWLockExclusive(&g_async_lock);
     for (unsigned i = 0; i < VOICE_ASYNC_LIMIT; ++i)
-        if (g_voice_controls[i] == request) { g_voice_controls[i] = NULL; internal = TRUE; break; }
+        if (request != NULL && g_voice_controls[i] == request) { g_voice_controls[i] = NULL; internal = TRUE; break; }
     for (unsigned i = 0; i < VOICE_ASYNC_LIMIT; ++i) {
         voice_job *job = &g_async_jobs[i];
         if (job->phase == VOICE_ISSUED && job->request == request) {
@@ -434,13 +491,38 @@ static BOOL voice_async_observe_response(void *message) {
                 if (bounded_string(group, HUD_HANDLE_BYTES - 1U, &bytes)) memcpy(room->group, group, bytes + 1U);
                 if (bounded_string(handle, HUD_HANDLE_BYTES - 1U, &bytes)) memcpy(room->handle, handle, bytes + 1U);
             }
-            if (code != 0 && job->type != REQUEST_LOGIN && voice_current_locked(job)) g_voice_rooms[job->room].exhausted = TRUE;
+            if (code != 0 && voice_current_locked(job)) {
+                memcpy(&sdk_status, (char *)message + RESPONSE_STATUS_CODE_OFFSET, 4U);
+                failed = TRUE; request_type = job->type; retryable = voice_sdk_retryable(sdk_status);
+                ULONGLONG now = GetTickCount64(), retry_at = now + VOICE_RETRY_COOLDOWN_MS;
+                if (job->type == REQUEST_LOGIN) {
+                    if (retryable) g_login_retry_after = retry_at;
+                } else {
+                    voice_room *room = &g_voice_rooms[job->room];
+                    room->exhausted = !retryable;
+                    if (!job->internal) room->accepted = FALSE;
+                    if (retryable) {
+                        room->retry_after = retry_at;
+                        if (job->internal) {
+                            room->media_failed = room->removed = TRUE;
+                            room->rejoin_after = now + 10000U; room->wake_announced = FALSE;
+                            if (g_async_wake != NULL) SetEvent(g_async_wake);
+                        }
+                    }
+                }
+            }
             SecureZeroMemory(job, sizeof(*job)); break;
         }
     }
     LONG outstanding = InterlockedCompareExchange(&g_sdk_outstanding, 0L, 0L);
     if (outstanding > 0L) InterlockedDecrement(&g_sdk_outstanding);
     ReleaseSRWLockExclusive(&g_async_lock);
+    if (failed) {
+        char line[160]; snprintf(line, sizeof(line),
+            "[rotk-vivoxproxy] sdk-failure: type=0x%x status=%d retryable=%u cooldown_ms=%u",
+            (unsigned)request_type, (int)sdk_status, (unsigned)retryable, retryable ? VOICE_RETRY_COOLDOWN_MS : 0U);
+        proxy_trace_line(line);
+    }
     return internal;
 }
 /* V5 events, pack(8): media type=20, removed=25. A successful join response
@@ -520,7 +602,7 @@ static void voice_async_observe_event(void *message) {
         }
         if (type == 20U && state == 2) { room->media_failed = FALSE; room->removed = FALSE; }
         if (type == 20U && state == 1) {
-            room->media_failed = status == 408 || status == 480 || status == 486 || status == 503;
+            room->media_failed = voice_sdk_retryable(status);
             room->rejoin_after = GetTickCount64() + 10000U;
             room->wake_announced = FALSE;
             if (status >= 400 && !room->media_failed) room->exhausted = TRUE;
@@ -562,14 +644,24 @@ static void voice_async_rejoin(void) {
     typedef int (__cdecl *create_fn)(void **);
     create_fn create = (create_fn)(uintptr_t)GetProcAddress(g_original_module, "vx_req_sessiongroup_add_session_create");
     void *request = NULL; int count = 0;
-    if (create == NULL || create(&request) != 0 || request == NULL) return;
-    char channel[64]; for (unsigned i = 0; i < 64U; ++i) channel[i] = (char)snapshot.channel[i];
-    char *group = g_strdup(snapshot.group), *uri = g_strdup(channel);
-    write_pointer(request, 0x30U, group); write_pointer(request, SESSIONGROUP_URI_OFFSET, uri);
-    memcpy((char *)request + 0x50U, &snapshot.connect_audio, 4U);
-    memcpy((char *)request + 0x5cU, &snapshot.connect_text, 4U);
-    if (group == NULL || uri == NULL || voice_async_enqueue(request, REQUEST_SESSIONGROUP_ADD, &count, snapshot.generation) != 0)
-        g_async_destroy_request(request);
+    if (create != NULL && create(&request) == 0 && request != NULL) {
+        char channel[64]; for (unsigned i = 0; i < 64U; ++i) channel[i] = (char)snapshot.channel[i];
+        char *group = g_strdup(snapshot.group), *uri = g_strdup(channel);
+        write_pointer(request, 0x30U, group); write_pointer(request, SESSIONGROUP_URI_OFFSET, uri);
+        memcpy((char *)request + 0x50U, &snapshot.connect_audio, 4U);
+        memcpy((char *)request + 0x5cU, &snapshot.connect_text, 4U);
+        if (group != NULL && uri != NULL && voice_async_enqueue(request, REQUEST_SESSIONGROUP_ADD, &count, snapshot.generation) == 0) return;
+    }
+    if (request != NULL) g_async_destroy_request(request);
+    AcquireSRWLockExclusive(&g_async_lock);
+    voice_room *room = &g_voice_rooms[selected];
+    if (room->desired && room->generation == snapshot.generation && room->epoch == snapshot.epoch) {
+        /* Queue/allocation pressure has not started a recovery episode. */
+        room->media_failed = room->removed = TRUE; room->restore_audio = snapshot.restore_audio;
+        room->rejoins = snapshot.rejoins; room->rejoin_after = GetTickCount64() + 10000U; room->wake_announced = FALSE;
+        if (g_async_wake != NULL) SetEvent(g_async_wake);
+    }
+    ReleaseSRWLockExclusive(&g_async_lock);
 }
 static void voice_async_stop(void) {
     AcquireSRWLockExclusive(&g_async_lock); g_async_stop = TRUE;
@@ -599,7 +691,8 @@ static void voice_async_clear(void) {
     InterlockedExchange(&g_sdk_outstanding, 0L);
     memset(g_voice_controls, 0, sizeof(g_voice_controls));
     g_voice_notify = NULL; g_voice_notify_cookie = NULL;
-    g_login_signature_set = FALSE; SecureZeroMemory(g_login_signature, sizeof(g_login_signature));
+    g_login_signature_set = FALSE; g_login_retry_after = 0U;
+    SecureZeroMemory(g_login_signature, sizeof(g_login_signature));
     ReleaseSRWLockExclusive(&g_async_lock);
 }
 #endif

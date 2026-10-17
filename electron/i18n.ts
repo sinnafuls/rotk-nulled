@@ -10,6 +10,8 @@ export const MAIN_COPY = {
     destinationNotNeeded: "This standalone client can be used directly.",
     clientInUse: "Close H1Z1 before changing its installation.",
     installationInProgress: "An installation is already in progress.",
+    driveUnavailable: "This drive is not available.",
+    steamUnavailable: "Steam could not be opened. Install H1Z1 (Z1 Battle Royale) from your Steam library.",
     clientNotReady: "The ROTK client is not ready.",
     identityLocked: "Close H1Z1 before changing the ROTK account key.",
     serverLocked: "Close H1Z1 before changing the ROTK server.",
@@ -44,8 +46,11 @@ export const MAIN_COPY = {
       busy: "An asset synchronization is already in progress.",
       disabled: "Asset synchronization is disabled in the launcher settings.",
     },
-    anticheat: {
-      settings: "Close H1Z1 before changing the anticheat module setting.",
+    inputProfile: {
+      restored: (path: string) =>
+        `Your H1Z1 key bindings file (InputProfile_User.xml) was damaged. ROTK restored its last working version and kept the damaged file here: ${path}`,
+      reset: (path: string) =>
+        `Your H1Z1 key bindings file (InputProfile_User.xml) was damaged and no working version had been saved yet, so H1Z1 uses the default key bindings. The damaged file was kept here: ${path}`,
     },
   },
   fr: {
@@ -57,6 +62,8 @@ export const MAIN_COPY = {
     destinationNotNeeded: "Ce client isolé peut être utilisé directement.",
     clientInUse: "Ferme H1Z1 avant de modifier son installation.",
     installationInProgress: "Une installation est déjà en cours.",
+    driveUnavailable: "Ce disque n’est pas disponible.",
+    steamUnavailable: "Steam n’a pas pu être ouvert. Installe H1Z1 (Z1 Battle Royale) depuis ta bibliothèque Steam.",
     clientNotReady: "Le client ROTK n’est pas prêt.",
     identityLocked: "Ferme H1Z1 avant de modifier la clé de compte ROTK.",
     serverLocked: "Ferme H1Z1 avant de changer de serveur ROTK.",
@@ -91,11 +98,15 @@ export const MAIN_COPY = {
       busy: "Une synchronisation des assets est déjà en cours.",
       disabled: "La synchronisation des assets est désactivée dans les réglages du launcher.",
     },
-    anticheat: {
-      settings: "Ferme H1Z1 avant de changer le réglage du module anticheat.",
+    inputProfile: {
+      restored: (path: string) =>
+        `Ton profil de touches H1Z1 (InputProfile_User.xml) était endommagé. ROTK a restauré sa dernière version valide et a gardé le fichier endommagé ici : ${path}`,
+      reset: (path: string) =>
+        `Ton profil de touches H1Z1 (InputProfile_User.xml) était endommagé et aucune version valide n’avait encore été sauvegardée : H1Z1 utilise donc les touches par défaut. Le fichier endommagé a été gardé ici : ${path}`,
     },
   },
   zh: {
+    driveUnavailable: "此磁盘不可用。",
     unexpectedError: "出现了意外错误。",
     installationCancelled: "安装已取消。",
     windowUnavailable: "启动器窗口不可用。",
@@ -104,6 +115,7 @@ export const MAIN_COPY = {
     destinationNotNeeded: "这个客户端可以直接使用，无需复制。",
     clientInUse: "请先关闭 H1Z1，再修改安装。",
     installationInProgress: "已有安装正在进行。",
+    steamUnavailable: "无法打开 Steam。请从 Steam 游戏库安装 H1Z1（Z1 Battle Royale）。",
     clientNotReady: "ROTK 客户端尚未就绪。",
     identityLocked: "请先关闭 H1Z1，再修改 ROTK 账号密钥。",
     serverLocked: "请先关闭 H1Z1，再切换 ROTK 服务器。",
@@ -138,8 +150,11 @@ export const MAIN_COPY = {
       busy: "资源正在同步中。",
       disabled: "资源同步已在启动器设置中关闭。",
     },
-    anticheat: {
-      settings: "请在关闭 H1Z1 后再修改反作弊模块设置。",
+    inputProfile: {
+      restored: (path: string) =>
+        `按键配置文件（InputProfile_User.xml）已损坏。已恢复上次可用的按键设置。损坏的文件保存在：${path}`,
+      reset: (path: string) =>
+        `按键配置文件（InputProfile_User.xml）已损坏，且没有可用的备份，已改用默认按键。损坏的文件保存在：${path}`,
     },
   },
 } as const;
@@ -156,11 +171,13 @@ const ENGLISH_ERRORS = new Map<string, string>([
   ["Une jonction ou un lien symbolique ne peut pas servir d’installation ROTK.", "A junction or symbolic link cannot be used as the ROTK installation."],
   ["La racine d’un disque ne peut pas servir directement d’installation ROTK.", "A drive root cannot be used directly as the ROTK installation."],
   ["La source Steam et l’installation ROTK doivent être dans deux arbres distincts.", "The Steam source and ROTK installation must be in separate directory trees."],
+  ["Le jeu ne peut pas être placé dans le dossier de ROTK Launcher : chaque mise à jour ou désinstallation du launcher supprime ce dossier. Place le jeu ailleurs, par exemple dans C:\\Games\\ROTK.", "The game cannot be placed in the ROTK Launcher folder: every launcher update or uninstall deletes that folder. Put the game somewhere else, for example in C:\\Games\\ROTK."],
   ["Le dossier temporaire de copie n’est pas sûr.", "The temporary copy directory is not safe."],
   ["Le dossier source contient un nombre anormal de fichiers.", "The source folder contains an unusually large number of files."],
-  ["Le dossier ROTK existe déjà. Choisis un nouvel emplacement vide.", "The ROTK folder already exists. Choose a new empty location."],
+  ["Le dossier ROTK choisi contient déjà d’autres fichiers. Choisis un dossier vide.", "The chosen ROTK folder already contains other files. Choose an empty folder."],
   ["H1Z1.exe a disparu pendant l’analyse du client.", "H1Z1.exe disappeared while the client was being scanned."],
   ["L’installation ROTK est incomplète : son marqueur est introuvable.", "The ROTK installation is incomplete: its marker is missing."],
+  ["Le jeu était installé dans le dossier de ROTK Launcher, que chaque mise à jour ou désinstallation du launcher supprime. Si tu l’as déplacé, sélectionne-le à son nouvel emplacement ; sinon, réinstalle-le ailleurs, par exemple dans C:\\Games\\ROTK.", "The game was installed in the ROTK Launcher folder, which every launcher update or uninstall deletes. If you moved it, select it at its new location; otherwise install it again somewhere else, for example in C:\\Games\\ROTK."],
   ["L’installation ROTK ne correspond plus à celle enregistrée par le launcher.", "The ROTK installation no longer matches the one saved by the launcher."],
   ["H1Z1.exe est introuvable dans l’installation ROTK.", "H1Z1.exe could not be found in the ROTK installation."],
   ["La sauvegarde de steam_api64.dll est absente. Réimporte le client.", "The steam_api64.dll backup is missing. Import the client again."],
@@ -183,6 +200,8 @@ const ENGLISH_ERRORS = new Map<string, string>([
   ["La sauvegarde du SDK Vivox historique est invalide.", "The legacy Vivox SDK backup is invalid."],
   ["Le proxy vocal ROTK n'a pas été copié correctement.", "The ROTK voice proxy was not copied correctly."],
   ["Le patch crouch ROTK obligatoire n'a pas été activé correctement.", "The mandatory ROTK crouch patch was not activated correctly."],
+  ["Le shim Steam ROTK embarqué est absent ou modifié. Ton antivirus l’a peut-être mis en quarantaine : restaure-le depuis Sécurité Windows ou réinstalle le launcher.", "The bundled ROTK Steam shim is missing or modified. Your antivirus may have quarantined it: restore it from Windows Security or reinstall the launcher."],
+  ["Le shim Steam ROTK n'a pas été copié correctement.", "The ROTK Steam shim was not copied correctly."],
   ["Le flux d’assets ROTK est indisponible. Vérifie ta connexion puis réessaie.", "The ROTK asset feed is unavailable. Check your connection and try again."],
   ["Trop de redirections pendant le téléchargement des assets.", "Too many redirects while downloading assets."],
   ["Téléchargement d’assets refusé (redirection invalide).", "Asset download refused (invalid redirect)."],
@@ -196,10 +215,44 @@ const FRENCH_ERRORS = new Map<string, string>([
   ["Unknown ROTK server", "Serveur ROTK inconnu."],
   ["Unknown ROTK launch role", "Mode de lancement ROTK inconnu."],
   ["Unknown ROTK launch profile", "Profil de lancement ROTK inconnu."],
+  ["The ROTK launcher key was rejected", "La clé launcher ROTK a été refusée. Recopie-la depuis ton compte sur le site."],
+  ["Too many ROTK authentication attempts. Wait a moment and try again", "Trop de tentatives de connexion ROTK. Attends un peu puis réessaie."],
+  ["The ROTK account service is temporarily unavailable", "Le service de compte ROTK est momentanément indisponible. Réessaie dans quelques minutes."],
+  ["The ROTK account service refused the launch request", "Le service de compte ROTK a refusé le lancement."],
+  ["The game files do not match the official ROTK installation. Use Verify files, then try again.", "Les fichiers du jeu ne correspondent pas à l’installation ROTK officielle. Utilise « Vérifier les fichiers », puis réessaie."],
+  ["This ROTK account is not ready to play yet. Sign in on the ROTK website, then try again.", "Ce compte ROTK n’est pas encore prêt. Connecte-toi sur le site ROTK, puis réessaie."],
+  ["Unable to reach the ROTK integrity service", "Impossible de joindre le service de vérification ROTK. Vérifie ta connexion."],
+  ["The ROTK integrity service is temporarily unavailable", "Le service de vérification ROTK est momentanément indisponible."],
+  ["Too many ROTK integrity checks. Wait a moment and try again", "Trop de vérifications ROTK. Attends un peu puis réessaie."],
 ]);
 
+// Why attestation could not run, quoted inside the "could not verify" message.
+const FRENCH_ATTESTATION_REASONS = new Map<string, string>([
+  ["Unable to reach the ROTK integrity service", "le service de vérification ROTK est injoignable."],
+  ["the integrity service could not be reached", "le service de vérification ROTK est injoignable."],
+  ["Invalid response from the ROTK integrity service", "le service de vérification ROTK a renvoyé une réponse invalide."],
+  ["The ROTK integrity service is temporarily unavailable", "le service de vérification ROTK est momentanément indisponible."],
+  ["Too many ROTK integrity checks. Wait a moment and try again", "trop de vérifications ROTK, attends un peu."],
+]);
+
+const FRENCH_NETWORK_CAUSES = new Map<string, string>([
+  ["timeout", "délai dépassé"],
+  ["cancelled", "annulé"],
+]);
+
+const DYNAMIC_FRENCH_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
+  [/^This launcher version is too old to verify the game files\. Update the launcher\.(?: Required version: (.+)\.)?$/, (match) => `Cette version du launcher n’est pas acceptée par le serveur. Mets le launcher à jour${match[1] ? ` (version attendue : ${match[1]})` : ""}.`],
+  [/^Unable to reach the ROTK account service(?: \((.+)\))?$/, (match) => `Impossible de joindre le service de compte ROTK${match[1] ? ` (${FRENCH_NETWORK_CAUSES.get(match[1]) ?? match[1]})` : ""}. Vérifie ta connexion, ton pare-feu ou ton antivirus.`],
+  [/^Invalid response from the ROTK account service(?: \(HTTP (\d+)\))?$/, (match) => `Réponse invalide du service de compte ROTK${match[1] ? ` (HTTP ${match[1]})` : ""}. Réessaie dans quelques minutes.`],
+  // ponytail: an unlisted reason falls back to a generic French one; the English detail stays in the console log.
+  [/^ROTK could not verify your game files: (.+?)\.? Check your connection and try again\.$/, (match) => `ROTK n’a pas pu vérifier tes fichiers de jeu : ${FRENCH_ATTESTATION_REASONS.get(match[1]) ?? "la vérification n’a pas pu aboutir."} Vérifie ta connexion puis réessaie.`],
+  [/^This ROTK account is suspended until (.+?)\.(?: Reason: (.+))?$/, (match) => `Ce compte ROTK est suspendu jusqu’au ${match[1]}.${match[2] ? ` Raison : ${match[2]}` : ""}`],
+  [/^This ROTK account is permanently banned\.(?: Reason: (.+))?$/, (match) => `Ce compte ROTK est banni définitivement.${match[1] ? ` Raison : ${match[1]}` : ""}`],
+];
+
 const DYNAMIC_ENGLISH_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
-  [/^H1Z1 s’est fermé pendant son initialisation \(code Windows (.+)\)\.$/, (match) => `H1Z1 closed during initialization (Windows code ${match[1]}).`],
+  [/^H1Z1 s’est fermé pendant son initialisation \(code Windows (.+?)\)\.(?: Windows a bloqué .+)?$/, (match) => `H1Z1 closed during initialization (Windows code ${match[1] === "inconnu" ? "unknown" : match[1]}).${gameExitHint(match[1], "en")}`],
+  [/^H1Z1 s’est fermé (\d+) s après son lancement \(code Windows (.+?)\)\.(?: Windows a bloqué .+?)? Si tu ne l’as pas fermé toi-même, relance le jeu ; si ça recommence, Debug \(dans les réglages\) permet d’envoyer un rapport à ROTK\.$/, (match) => `H1Z1 closed ${match[1]} s after it started (Windows code ${match[2] === "inconnu" ? "unknown" : match[2]}).${gameExitHint(match[2], "en")} If you did not close it yourself, start the game again; if it happens again, Debug (in the settings) lets you send a report to ROTK.`],
   [/^Client H1Z1 incomplet : (.+) est introuvable\.$/, (match) => `Incomplete H1Z1 client: ${match[1]} could not be found.`],
   [/^Un fichier du launcher est absent : (.+)\. Ton antivirus l’a peut-être mis en quarantaine : restaure-le depuis Sécurité Windows ou réinstalle le launcher\.$/, (match) => `A launcher file is missing: ${match[1]}. Your antivirus may have quarantined it: restore it from Windows Security or reinstall the launcher.`],
   [/^ROTK ne peut pas jouer depuis un dossier « (.+) »\. Choisis un emplacement indépendant de Steam\.$/, (match) => `ROTK cannot run from a “${match[1]}” folder. Choose a location outside Steam.`],
@@ -212,10 +265,14 @@ const DYNAMIC_ENGLISH_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string
   [/^La copie de (.+) ne correspond pas à la source\.$/, (match) => `The copy of ${match[1]} does not match the source.`],
   [/^Le fichier source (.+) a changé pendant la copie\.$/, (match) => `The source file ${match[1]} changed during the copy.`],
   [/^Erreur launcher ([a-f0-9]+) : (.+)$/, (match) => `Launcher error ${match[1]}: ${match[2]}`],
+  [/^Le runtime Microsoft Visual C\+\+ x64 nécessaire à ROTK est absent de ce PC \((\S+) introuvable\)\. Installe-le depuis (\S+) puis réessaie\.$/, (match) => `The Microsoft Visual C++ x64 runtime ROTK needs is missing from this PC (${match[1]} not found). Install it from ${match[2]} and try again.`],
+  [/^Le runtime Microsoft Visual C\+\+ x64 de ce PC est trop ancien \((\S+) (\S+), minimum (\S+)\) : H1Z1 se fermerait au démarrage\. Installe la dernière version depuis (\S+) puis réessaie\.$/, (match) => `The Microsoft Visual C++ x64 runtime on this PC is too old (${match[1]} ${match[2]}, minimum ${match[3]}): H1Z1 would close as soon as it starts. Install the latest version from ${match[4]} and try again.`],
+  [/^Le dossier du jeu contient une ancienne copie de (\S+) \((\S+), minimum (\S+)\) : H1Z1 se fermerait au démarrage\. Supprime (.+) puis réessaie\.$/, (match) => `The game folder contains an old copy of ${match[1]} (${match[2]}, minimum ${match[3]}): H1Z1 would close as soon as it starts. Delete ${match[4]} and try again.`],
   [/^Manifeste d’assets invalide : (.+)\.$/, (match) => `Invalid asset manifest: ${match[1]}.`],
   [/^Archive d’assets invalide : (.+)\.$/, (match) => `Invalid asset archive: ${match[1]}.`],
   [/^L’asset (.+) est corrompu \(empreinte SHA-256 inattendue\)\.$/, (match) => `The ${match[1]} asset is corrupted (unexpected SHA-256 fingerprint).`],
   [/^L’asset (.+) dépasse la taille annoncée\.$/, (match) => `The ${match[1]} asset exceeds its declared size.`],
+  [/^Le téléchargement de l’asset (.+) s’est interrompu\.$/, (match) => `The download of the ${match[1]} asset was interrupted.`],
   [/^Hôte de téléchargement d’assets non autorisé : (.+)\.$/, (match) => `Asset download host not allowed: ${match[1]}.`],
   [/^Téléchargement d’assets refusé \(HTTP (\d+)\)\.$/, (match) => `Asset download refused (HTTP ${match[1]}).`],
   [/^Erreur système \(([^)]+)\)\.$/, (match) => `System error (${match[1]}).`],
@@ -225,6 +282,14 @@ const DYNAMIC_ENGLISH_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string
   [/^Disque plein pendant l’écriture de (.+)\. Libère de l’espace puis réessaie\.$/, (match) => `Disk full while writing ${match[1]}. Free some space and try again.`],
   [/^Fichier introuvable : (.+)\.$/, (match) => `File not found: ${match[1]}.`],
 ];
+
+/** Hint the launcher adds after the Windows code of a closed game: 0xC0E90002 is an App Control block. */
+function gameExitHint(code: string, locale: "en" | "zh"): string {
+  if (code !== "0xC0E90002") return "";
+  return locale === "en"
+    ? " Windows blocked a game file with an App Control policy: check Smart App Control in Windows Security > App & browser control."
+    : "Windows 的应用控制策略阻止了一个游戏文件：请在“Windows 安全中心 > 应用和浏览器控制”中检查“智能应用控制”。";
+}
 
 const CHINESE_ERRORS = new Map<string, string>([
   ["The ROTK launcher key was rejected", "ROTK 启动器密钥无效，请到网站账号页面重新复制。"],
@@ -242,6 +307,8 @@ const CHINESE_ERRORS = new Map<string, string>([
   ["Cette version de H1Z1 n’est pas encore prise en charge par ROTK. Vérifie les fichiers du jeu dans Steam puis réessaie.", "ROTK 暂不支持这个版本的 H1Z1。请在 Steam 中验证游戏文件完整性后重试。"],
   ["Installe d’abord le client ROTK.", "请先安装 ROTK 客户端。"],
   ["L’installation ROTK est incomplète : son marqueur est introuvable.", "ROTK 安装不完整，请重新安装。"],
+  ["Le jeu ne peut pas être placé dans le dossier de ROTK Launcher : chaque mise à jour ou désinstallation du launcher supprime ce dossier. Place le jeu ailleurs, par exemple dans C:\\Games\\ROTK.", "游戏不能放在 ROTK Launcher 文件夹内：每次更新或卸载启动器都会删除该文件夹。请把游戏放到其他位置，例如 C:\\Games\\ROTK。"],
+  ["Le jeu était installé dans le dossier de ROTK Launcher, que chaque mise à jour ou désinstallation du launcher supprime. Si tu l’as déplacé, sélectionne-le à son nouvel emplacement ; sinon, réinstalle-le ailleurs, par exemple dans C:\\Games\\ROTK.", "游戏之前安装在 ROTK Launcher 文件夹内，而每次更新或卸载启动器都会删除该文件夹。如果你已移动游戏，请在新位置重新选择它；否则请把游戏重新安装到其他位置，例如 C:\\Games\\ROTK。"],
   ["This launcher version is too old to verify the game files. Update the launcher.", "服务器不接受当前版本的启动器，请先更新启动器。"],
   ["Unable to reach the ROTK account service", "无法连接 ROTK 账号服务。请检查网络、防火墙或杀毒软件设置。"],
   ["Invalid response from the ROTK account service", "ROTK 账号服务返回异常，请几分钟后重试。"],
@@ -249,11 +316,16 @@ const CHINESE_ERRORS = new Map<string, string>([
 
 const DYNAMIC_CHINESE_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
   [/^Espace disque insuffisant : (.+) Go sont nécessaires\.$/, (match) => `磁盘空间不足，需要 ${match[1]} GB。`],
+  [/^Le runtime Microsoft Visual C\+\+ x64 nécessaire à ROTK est absent de ce PC \((\S+) introuvable\)\. Installe-le depuis (\S+) puis réessaie\.$/, (match) => `此电脑缺少 ROTK 所需的 Microsoft Visual C++ x64 运行库（找不到 ${match[1]}）。请从 ${match[2]} 安装后重试。`],
+  [/^Le runtime Microsoft Visual C\+\+ x64 de ce PC est trop ancien \((\S+) (\S+), minimum (\S+)\) : H1Z1 se fermerait au démarrage\. Installe la dernière version depuis (\S+) puis réessaie\.$/, (match) => `此电脑的 Microsoft Visual C++ x64 运行库版本过旧（${match[1]} ${match[2]}，最低要求 ${match[3]}），H1Z1 会在启动时关闭。请从 ${match[4]} 安装最新版本后重试。`],
+  [/^Le dossier du jeu contient une ancienne copie de (\S+) \((\S+), minimum (\S+)\) : H1Z1 se fermerait au démarrage\. Supprime (.+) puis réessaie\.$/, (match) => `游戏文件夹中有旧版 ${match[1]}（${match[2]}，最低要求 ${match[3]}），H1Z1 会在启动时关闭。请删除 ${match[4]} 后重试。`],
   [/^Client H1Z1 incomplet : (.+) est introuvable\.$/, (match) => `H1Z1 客户端不完整：找不到 ${match[1]}。请在 Steam 中验证游戏文件完整性。`],
   [/^Téléchargement d’assets refusé \(HTTP (\d+)\)\.$/, (match) => `资源下载失败（HTTP ${match[1]}），请稍后重试。`],
   [/^ROTK could not verify your game files: (.+) Check your connection and try again\.$/, (match) => `ROTK 无法验证你的游戏文件：${match[1]} 请检查网络后重试。`],
   [/^This ROTK account is suspended until (.+?)\.(?: Reason: (.+))?$/, (match) => `此 ROTK 账号已被封禁至 ${match[1]}。${match[2] ? `原因：${match[2]}` : ""}`],
   [/^This ROTK account is permanently banned\.(?: Reason: (.+))?$/, (match) => `此 ROTK 账号已被永久封禁。${match[1] ? `原因：${match[1]}` : ""}`],
+  [/^H1Z1 s’est fermé pendant son initialisation \(code Windows (.+?)\)\.(?: Windows a bloqué .+)?$/, (match) => `H1Z1 在初始化时关闭（Windows 代码 ${match[1] === "inconnu" ? "未知" : match[1]}）。${gameExitHint(match[1], "zh")}`],
+  [/^H1Z1 s’est fermé (\d+) s après son lancement \(code Windows (.+?)\)\.(?: Windows a bloqué .+?)? Si tu ne l’as pas fermé toi-même, relance le jeu ; si ça recommence, Debug \(dans les réglages\) permet d’envoyer un rapport à ROTK\.$/, (match) => `H1Z1 在启动 ${match[1]} 秒后关闭（Windows 代码 ${match[2] === "inconnu" ? "未知" : match[2]}）。${gameExitHint(match[2], "zh")}如果不是你自己关闭的，请重新启动游戏；如果再次发生，可以通过设置中的“调试”向 ROTK 发送报告。`],
 ];
 
 const ACCOUNT_CONNECTION_ERRORS = {
@@ -282,6 +354,11 @@ const ACCOUNT_CONNECTION_ERRORS = {
     fr: "Impossible de vérifier le certificat du service de compte ROTK. Vérifie la date et l’heure de ton ordinateur.",
     zh: "无法验证 ROTK 账号服务的证书，请检查电脑的日期和时间。",
   },
+  interception: {
+    en: "Unable to verify the ROTK account service certificate. Your antivirus or a proxy may be inspecting secure connections: turn off HTTPS scanning for the launcher or check your proxy settings.",
+    fr: "Impossible de vérifier le certificat du service de compte ROTK. Ton antivirus ou un proxy inspecte peut-être les connexions sécurisées : désactive l’analyse HTTPS pour le launcher ou vérifie tes paramètres de proxy.",
+    zh: "无法验证 ROTK 账号服务的证书。杀毒软件或代理可能正在检查加密连接，请为启动器关闭 HTTPS 扫描，或检查代理设置。",
+  },
   response: {
     en: "The ROTK account service returned an invalid response. Please try again later.",
     fr: "Le service de compte ROTK a renvoyé une réponse invalide. Réessaie plus tard.",
@@ -298,10 +375,21 @@ export function localizeServiceError(message: string, locale: AppLocale): string
     else if (["timeout", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(code)) kind = "timeout";
     else if (["ENOTFOUND", "EAI_AGAIN"].includes(code)) kind = "dns";
     else if (["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(code)) kind = "interrupted";
-    else if (["CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID"].includes(code)) kind = "certificate";
+    else if (["CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID"].includes(code)) kind = "certificate";
+    // Node trusts only its bundled roots, so an antivirus or proxy that
+    // re-signs HTTPS fails here; the clock only affects the dates above.
+    else if (["DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID"].includes(code)) kind = "interception";
     return ACCOUNT_CONNECTION_ERRORS[kind][locale] + (code ? ` (${code})` : "");
   }
-  if (locale === "fr") return FRENCH_ERRORS.get(message) ?? message;
+  if (locale === "fr") {
+    const exact = FRENCH_ERRORS.get(message);
+    if (exact) return exact;
+    for (const [pattern, translate] of DYNAMIC_FRENCH_ERRORS) {
+      const match = message.match(pattern);
+      if (match) return translate(match);
+    }
+    return message;
+  }
   if (locale === "zh") {
     const exact = CHINESE_ERRORS.get(message);
     if (exact) return exact;

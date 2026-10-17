@@ -1,8 +1,13 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { CRITICAL_CLIENT_FILES } from "../electron/constants.js";
 import {
+  PathPolicyError,
+  assertOutsideLauncherFolder,
+  classifyClientSource,
+  isInLauncherFolder,
   pathPolicyInternals,
   resolvePhysicalPath,
   validateInstallDestination,
@@ -71,5 +76,39 @@ describe("installation path policy", () => {
     await expect(validateInstallDestination("E:\\ROTK\\client:payload")).rejects.toMatchObject({
       name: "PathPolicyError",
     });
+  });
+
+  it("recognizes the launcher folder and everything below it", () => {
+    const launcher = "C:\\Program Files\\ROTK Launcher";
+    expect(isInLauncherFolder(launcher, launcher)).toBe(true);
+    expect(isInLauncherFolder("c:\\program files\\rotk launcher\\ROTK", launcher)).toBe(true);
+    expect(isInLauncherFolder(`${launcher}\\resources\\ROTK`, launcher)).toBe(true);
+    expect(isInLauncherFolder("C:\\Program Files\\ROTK Launcher-old\\ROTK", launcher)).toBe(false);
+    expect(isInLauncherFolder("C:\\Games\\ROTK", launcher)).toBe(false);
+    // Development builds have no installer that deletes their folder.
+    expect(isInLauncherFolder(`${launcher}\\ROTK`, null)).toBe(false);
+
+    expect(() => assertOutsideLauncherFolder(`${launcher}\\ROTK`, launcher)).toThrow(PathPolicyError);
+    expect(() => assertOutsideLauncherFolder("C:\\Games\\ROTK", launcher)).not.toThrow();
+  });
+
+  it("refuses a standalone client kept inside the launcher folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "vitest-path-policy-"));
+    temporaryRoots.push(root);
+    const launcher = join(root, "ROTK Launcher");
+    const inside = join(launcher, "ROTK");
+    const outside = join(root, "Games", "ROTK");
+    for (const client of [inside, outside]) {
+      await mkdir(client, { recursive: true });
+      for (const fileName of CRITICAL_CLIENT_FILES) await writeFile(join(client, fileName), "");
+    }
+    const launcherFolder = await realpath(launcher);
+
+    await expect(classifyClientSource(inside, launcherFolder)).rejects.toMatchObject({
+      name: "PathPolicyError",
+      message: expect.stringContaining("ROTK Launcher"),
+    });
+    await expect(classifyClientSource(outside, launcherFolder)).resolves.toMatchObject({ kind: "direct" });
+    await expect(classifyClientSource(inside, null)).resolves.toMatchObject({ kind: "direct" });
   });
 });

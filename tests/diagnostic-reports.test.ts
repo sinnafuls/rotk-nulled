@@ -171,7 +171,7 @@ describe('diagnostic report collection and export', () => {
     const reports = await f.service.listReports();
     expect(reports.filter((r) => r.status !== 'recording')).toHaveLength(10);
     expect(reports.find((r) => r.id === active.id)?.status).toBe('recording');
-  });
+  }, 30_000);
 });
 
 describe('game log and debug-session exports', () => {

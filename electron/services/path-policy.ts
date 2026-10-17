@@ -98,8 +98,27 @@ export async function validateClientSource(sourceInput: string): Promise<string>
   return source;
 }
 
+/**
+ * The launcher's uninstaller deletes the whole launcher folder, and every
+ * launcher update runs it first, so a game kept there is lost. A null folder
+ * means no installer manages the launcher (development).
+ */
+export function isInLauncherFolder(root: string, launcherFolder: string | null): boolean {
+  return launcherFolder !== null && isSameOrNested(root, launcherFolder);
+}
+
+/** Only for a folder being chosen now: start-up and launch checks keep existing installs usable. */
+export function assertOutsideLauncherFolder(root: string, launcherFolder: string | null): void {
+  if (isInLauncherFolder(root, launcherFolder)) {
+    throw new PathPolicyError(
+      "Le jeu ne peut pas être placé dans le dossier de ROTK Launcher : chaque mise à jour ou désinstallation du launcher supprime ce dossier. Place le jeu ailleurs, par exemple dans C:\\Games\\ROTK.",
+    );
+  }
+}
+
 export async function classifyClientSource(
   sourceInput: string,
+  launcherFolder: string | null,
 ): Promise<{ root: string; kind: ClientSourceKind }> {
   const root = await validateClientSource(sourceInput);
   if (hasForbiddenSegment(root)) return { root, kind: "copy-required" };
@@ -107,6 +126,7 @@ export async function classifyClientSource(
   // A standalone client is allowed in place only when it also satisfies every
   // destination safety rule. Steam paths are deliberately handled by copying.
   await validateInstallDestination(root);
+  assertOutsideLauncherFolder(root, launcherFolder);
   return { root, kind: "direct" };
 }
 

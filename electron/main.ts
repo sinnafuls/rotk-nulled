@@ -3,8 +3,8 @@ import { writeFileSync } from "node:fs";
 import { rotateIdentity } from "./services/synthetic-identity.js";
 import { runNetworkCheck } from "./services/network-check.js";
 import type { NetworkCheckReport } from "../shared/contracts.js";
-import { mkdir, stat } from "node:fs/promises";
-import { join, basename, dirname, resolve, sep } from "node:path";
+import { mkdir, realpath, stat, statfs } from "node:fs/promises";
+import { join, basename, dirname, parse, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   app,
@@ -25,6 +25,7 @@ import {
   type AssetSyncSummary,
   type AssetSyncWarning,
   type ClientSourceKind,
+  type InstallDrive,
   type LauncherPhase,
   type LauncherSnapshot,
   type OperationResult,
@@ -56,18 +57,19 @@ import {
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
 import { DiscordPresence } from "./services/discord-presence.js";
-import { adoptExistingClient, installClient } from "./services/installer.js";
+import { adoptExistingClient, cleanupInstallLeftovers, inspectDestination, installClient, lostWithLauncherFolder } from "./services/installer.js";
 import {
   GameLauncher,
   validateInstalledClient,
   type AttestationOutcome,
 } from "./services/game-launcher.js";
+import type { InputProfileRecovery } from "./services/input-profile-recovery.js";
 import { HWID_CORE_SLOTS, collectHwid } from "./services/machine-identity.js";
 import { collectTpmProof } from "./services/tpm-identity.js";
 import { collectTpmAnchor, enrolTpmAnchor } from "./services/tpm-anchor.js";
 import { tpmBindingMessage } from "../shared/attestation.js";
-import { classifyClientSource, validateInstallDestination } from "./services/path-policy.js";
-import { locateSteamClient } from "./services/steam-locator.js";
+import { PathPolicyError, assertOutsideLauncherFolder, classifyClientSource, validateInstallDestination } from "./services/path-policy.js";
+import { H1Z1_STEAM_APP_ID, locateSteamClient } from "./services/steam-locator.js";
 import {
   runtimeConfigFor,
   runtimeConfigList,
@@ -80,9 +82,9 @@ import {
   type ServerStatus,
 } from "./services/server-status.js";
 import { UpdateFeedService } from "./services/update-feed.js";
-import { AssetSyncService } from "./services/asset-sync.js";
+import { AssetSyncService, assetSyncInternals } from "./services/asset-sync.js";
 import { LauncherUpdateService } from "./services/launcher-update.js";
-import { hasLauncherUpdate } from "../shared/launcher-update.js";
+import { launcherUpdateBlocksPlay } from "../shared/launcher-update.js";
 import electronUpdater from "electron-updater";
 import { localizeServiceError, MAIN_COPY } from "./i18n.js";
 import { identityFromPlayerKey } from "./services/player-identity.js";
@@ -194,6 +196,11 @@ let destinationRecommended = false;
 let progress: LauncherSnapshot["progress"] = null;
 let updates: LauncherSnapshot["updates"] = [];
 let lastErrorRaw: string | null = null;
+// Kept until dismissed or the next Play, so a failed launch cannot hide it.
+let inputProfileRecovery: InputProfileRecovery | null = null;
+// Set when the server refuses a launch for launcher_update_required: the update
+// becomes mandatory (Play is blocked) until a newer launcher is installed.
+let updateRequired = false;
 let gamePid: number | null = null;
 let currentLocale: AppLocale = "en";
 let playerKeys: PlayerKeySet = {};
@@ -347,30 +354,90 @@ async function refreshServerStatus(): Promise<void> {
   await broadcastSnapshot();
 }
 
-function recommendedDestinationPath(): string {
-  const systemDrive = process.env.SystemDrive ?? "C:";
-  return join(`${systemDrive}${sep}`, RECOMMENDED_INSTALL_PARENT_NAME, ROTK_INSTALL_DIRECTORY_NAME);
+// Free space wanted before a drive is offered (~35 GB): the client copy
+// (~20 GB), the asset cache at its cap, and headroom for extraction and backups.
+const RECOMMENDED_FREE_BYTES = 20 * 1024 ** 3 + assetSyncInternals.MAX_TOTAL_ASSET_BYTES + 7 * 1024 ** 3;
+
+function destinationOnDrive(driveRoot: string): string {
+  return join(driveRoot, RECOMMENDED_INSTALL_PARENT_NAME, ROTK_INSTALL_DIRECTORY_NAME);
+}
+
+// A disconnected network drive can hold statfs for a long time, and each
+// pending call ties up a libuv thread: never start a second one per drive.
+const pendingDriveStats = new Map<string, Promise<Awaited<ReturnType<typeof statfs>> | null>>();
+
+async function statDrive(root: string): Promise<InstallDrive | null> {
+  let pending = pendingDriveStats.get(root);
+  if (!pending) {
+    pending = statfs(root).catch(() => null).finally(() => pendingDriveStats.delete(root));
+    pendingDriveStats.set(root, pending);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const disk = await Promise.race([
+    pending,
+    new Promise<null>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(null), 2_000); }),
+  ]);
+  clearTimeout(timer);
+  if (!disk || Number(disk.blocks) === 0) return null;
+  return {
+    root,
+    freeBytes: Number(disk.bavail) * Number(disk.bsize),
+    totalBytes: Number(disk.blocks) * Number(disk.bsize),
+  };
+}
+
+async function listInstallDrives(): Promise<InstallDrive[]> {
+  const drives = await Promise.all([..."CDEFGHIJKLMNOPQRSTUVWXYZ"].map((letter) => statDrive(`${letter}:\\`)));
+  // Too small or read-only (optical drives report 0 free): not worth offering.
+  return drives.filter((drive): drive is InstallDrive =>
+    drive !== null && drive.freeBytes >= RECOMMENDED_FREE_BYTES);
+}
+
+/** Validates a destination and refuses folders holding someone else's files. */
+async function acceptDestination(candidate: string): Promise<string> {
+  const destination = await validateInstallDestination(candidate, sourceRoot ?? undefined);
+  assertOutsideLauncherFolder(destination, await installedLauncherFolder());
+  if (await inspectDestination(destination) === "foreign") {
+    throw new PathPolicyError(
+      "Le dossier ROTK choisi contient déjà d’autres fichiers. Choisis un dossier vide.",
+    );
+  }
+  return destination;
+}
+
+/** The installed launcher's own folder, which its updates delete; null in development. */
+async function installedLauncherFolder(): Promise<string | null> {
+  const folder = dirname(app.getPath("exe"));
+  return app.isPackaged ? realpath(folder).catch(() => resolve(folder)) : null;
 }
 
 /**
- * Pre-fill the ROTK destination with the recommended default so a detected or
- * freshly selected Steam client only needs one Install click. Best-effort: an
- * already existing folder (the installer requires an empty target) or a
- * failing path policy leaves the destination for manual selection.
+ * Pre-fill the ROTK destination so a detected or freshly selected Steam client
+ * only needs one Install click: the folder of an unfinished copy first (even
+ * from before a restart), then the recommended default. A half-finished or
+ * finished ROTK folder is fine: installing resumes or repairs it.
  */
 async function applyRecommendedDestination(): Promise<void> {
   if (sourceKind !== "copy-required" || !sourceRoot) return;
-  try {
-    const candidate = recommendedDestinationPath();
-    const existing = await stat(candidate).catch(() => null);
-    if (existing) return;
-    destinationRoot = await validateInstallDestination(candidate, sourceRoot);
-    destinationRecommended = true;
-    phase = "destination-selected";
-  } catch {
-    destinationRoot = null;
-    destinationRecommended = false;
+  const { pendingInstallRoot } = await configStore.load();
+  const drives = [...new Set([parse(sourceRoot).root, `${process.env.SystemDrive ?? "C:"}\\`].map(value => value.toUpperCase()))];
+  const candidates = [...(pendingInstallRoot ? [pendingInstallRoot] : [])];
+  for (const drive of drives) {
+    const details = await statDrive(drive);
+    if (details && details.freeBytes >= RECOMMENDED_FREE_BYTES) candidates.push(destinationOnDrive(drive));
   }
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      destinationRoot = await acceptDestination(candidate);
+      destinationRecommended = true;
+      phase = "destination-selected";
+      return;
+    } catch {
+      // Try the next one; the player can still pick a folder.
+    }
+  }
+  destinationRoot = null;
+  destinationRecommended = false;
 }
 
 function assetSyncSummary(): AssetSyncSummary {
@@ -435,6 +502,9 @@ async function runAssetSync(mode: "sync" | "verify", soft: boolean): Promise<Ope
  * evidence will not match, so the rejection is logged for the admin studio
  * instead of being silently hidden by the client.
  */
+// Ask for a new challenge when less than this is left after hashing.
+const CHALLENGE_MARGIN_MS = 60_000;
+
 async function attestInstallation(
   playerKey: string,
   runtime: RuntimeConfig,
@@ -453,7 +523,7 @@ async function attestInstallation(
     const marker = await readInstallationMarker(root);
     if (!marker) return { status: "not-applicable", clientPatchMode: fallbackMode };
 
-    const challenge = await requestAttestationChallenge(
+    let challenge = await requestAttestationChallenge(
       playerKey,
       runtime.attestationChallengeUrl,
       launcherVersion,
@@ -498,6 +568,10 @@ async function attestInstallation(
         : []),
     ]);
 
+    // The fingerprint only needs the slots the challenge names: read it while
+    // the files are hashed instead of after.
+    const hwidSlots = challenge.hwidSlots ?? HWID_CORE_SLOTS;
+    const hwidPromise = collectHwid(hwidSlots).catch(() => ({}));
     const measurement = await measureInstallation({
       installationRoot: root,
       userDataDirectory,
@@ -516,10 +590,26 @@ async function attestInstallation(
         `Integrity attestation found ${measurement.deviations.length} deviation(s); reporting them.`,
       );
     }
+    // A first launch hashes the whole client and can outlive the challenge.
+    // The measurement does not depend on it, so a fresh one with the same
+    // build, policy, pack, patch mode and slots can be used as is. A failed
+    // renewal keeps the old one, which the server may still accept.
+    if (Date.parse(challenge.expiresAt) - Date.now() < CHALLENGE_MARGIN_MS) {
+      const fresh = await requestAttestationChallenge(playerKey, runtime.attestationChallengeUrl, launcherVersion)
+        .catch(() => challenge);
+      if (
+        fresh.baseBuildId === challenge.baseBuildId
+        && fresh.policyVersion === challenge.policyVersion
+        && fresh.packVersion === challenge.packVersion
+        && (fresh.clientPatchMode ?? "clean") === clientPatchMode
+        && JSON.stringify(fresh.hwidSlots ?? HWID_CORE_SLOTS) === JSON.stringify(hwidSlots)
+      ) {
+        challenge = fresh;
+      }
+    }
     // The fingerprint this launch was asked for (#320 §B): the slots the signed
-    // challenge names, or the core five for a server that names none. Read
-    // after the challenge, so the answer is to this launch's question.
-    const hwid = await collectHwid(challenge.hwidSlots ?? HWID_CORE_SLOTS).catch(() => ({}));
+    // challenge names, or the core five for a server that names none.
+    const hwid = await hwidPromise;
     // Sign with the TPM-backed key when the machine has one; null when it does
     // not, and the launch proceeds without it. The message binds the
     // (single-use) challengeId to the fingerprint exactly as the ticket will
@@ -527,12 +617,15 @@ async function attestInstallation(
     // single-use challenge stops replay. The server decides (behind its own
     // flag) whether a missing proof is acceptable.
     const bindingMessage = tpmBindingMessage(challenge.challengeId, hwid);
-    const tpmProof = await collectTpmProof(bindingMessage).catch(() => null);
+    // Both TPM steps sign the same message; run them side by side.
+    const [tpmProof, anchor] = await Promise.all([
+      collectTpmProof(bindingMessage).catch(() => null),
+      collectTpmAnchor(bindingMessage).catch(() => null),
+    ]);
     // Level-2 anchor (#320 §A): the TPM identity key signs the same message,
     // and the server is told which endorsement key it lives under — a
     // credential activation the first time, one confirming request after.
     // Observe only: a machine without it launches exactly as before.
-    const anchor = await collectTpmAnchor(bindingMessage).catch(() => null);
     if (anchor !== null) {
       const enrolment = await enrolTpmAnchor(
         { beginUrl: runtime.tpmEnrolBeginUrl, completeUrl: runtime.tpmEnrolCompleteUrl },
@@ -621,16 +714,19 @@ async function snapshot(): Promise<LauncherSnapshot> {
       : null,
     progress,
     error: lastErrorRaw ? localizeServiceError(lastErrorRaw, currentLocale) : null,
+    notice: inputProfileRecovery
+      ? MAIN_COPY[currentLocale].inputProfile[inputProfileRecovery.restored ? "restored" : "reset"](inputProfileRecovery.damagedCopy)
+      : null,
     gamePid,
-    updateRequired: hasLauncherUpdate(launcherUpdate.state),
-    anticheatEnabled,
+    updateRequired: updateRequired || launcherUpdateBlocksPlay(launcherUpdate.state),
     canPlay:
       phase === "ready"
       && configuredRoot !== null
       && activeKey() !== null
       && !gameLauncher.isRunning()
       && !debugSettingWrite && !diagnosticWorkInProgress()
-      && !hasLauncherUpdate(launcherUpdate.state),
+      // A mandatory update blocks Play until a newer launcher is installed.
+      && !updateRequired && !launcherUpdateBlocksPlay(launcherUpdate.state),
   };
 }
 
@@ -906,7 +1002,7 @@ function registerIpc(): void {
       try {
         const located = await locateSteamClient();
         if (!located) return { ok: true, value: { sourceRoot: null } };
-        const selectedClient = await classifyClientSource(located);
+        const selectedClient = await classifyClientSource(located, await installedLauncherFolder());
         sourceRoot = selectedClient.root;
         sourceKind = selectedClient.kind;
         sourceDetected = true;
@@ -940,7 +1036,7 @@ function registerIpc(): void {
       });
       if (selected.canceled || selected.filePaths.length === 0) return { ok: false, cancelled: true };
       try {
-        const selectedClient = await classifyClientSource(selected.filePaths[0]);
+        const selectedClient = await classifyClientSource(selected.filePaths[0], await installedLauncherFolder());
         sourceRoot = selectedClient.root;
         sourceKind = selectedClient.kind;
         sourceDetected = false;
@@ -979,7 +1075,7 @@ function registerIpc(): void {
         const candidate = basename(parent).toLocaleLowerCase("en-US") === ROTK_INSTALL_DIRECTORY_NAME.toLocaleLowerCase("en-US")
           ? parent
           : join(parent, ROTK_INSTALL_DIRECTORY_NAME);
-        destinationRoot = await validateInstallDestination(candidate, sourceRoot);
+        destinationRoot = await acceptDestination(candidate);
         destinationRecommended = false;
         phase = "destination-selected";
         lastErrorRaw = null;
@@ -995,10 +1091,52 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.openSteamInstall,
+    trustedHandler(async (): Promise<OperationResult> => {
+      try {
+        await shell.openExternal(`steam://install/${H1Z1_STEAM_APP_ID}`);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: MAIN_COPY[currentLocale].steamUnavailable };
+      }
+    }),
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.dismissError,
     trustedHandler(async () => {
-      lastErrorRaw = null;
+      // The renderer shows an error before a notice: close them in that order.
+      if (lastErrorRaw !== null) lastErrorRaw = null;
+      else inputProfileRecovery = null;
       await broadcastSnapshot();
+    }),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.listInstallDrives,
+    trustedHandler(async () => listInstallDrives()),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.chooseInstallDrive,
+    trustedHandler(async (_event, root: unknown): Promise<OperationResult<{ destinationRoot: string }>> => {
+      const copy = MAIN_COPY[currentLocale];
+      if (!sourceRoot) return { ok: false, error: copy.selectSourceFirst };
+      if (sourceKind !== "copy-required") return { ok: false, error: copy.destinationNotNeeded };
+      if (installAbortController) return { ok: false, error: copy.installationInProgress };
+      if (typeof root !== "string" || !/^[C-Z]:\\$/.test(root) || !(await statDrive(root))) {
+        return { ok: false, error: copy.driveUnavailable };
+      }
+      try {
+        destinationRoot = await acceptDestination(destinationOnDrive(root));
+        destinationRecommended = false;
+        phase = "destination-selected";
+        lastErrorRaw = null;
+        await broadcastSnapshot();
+        return { ok: true, value: { destinationRoot } };
+      } catch (error) {
+        return operationError<{ destinationRoot: string }>(error);
+      }
     }),
   );
 
@@ -1025,25 +1163,33 @@ function registerIpc(): void {
         const installationRoot = sourceKind === "direct"
           ? sourceRoot
           : destinationRoot as string;
-        const marker = sourceKind === "direct"
-          ? await adoptExistingClient({
-              root: sourceRoot,
-              shimPath: resolveBundledShimPath(),
-              vivoxProxyPath: resolveBundledVivoxProxyPath(),
-              vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
-              launcherVersion: app.getVersion(),
-              onProgress,
-            })
-          : await installClient({
-              sourceRoot,
-              destinationRoot: installationRoot,
-              shimPath: resolveBundledShimPath(),
-              vivoxProxyPath: resolveBundledVivoxProxyPath(),
-              vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
-              launcherVersion: app.getVersion(),
-              signal: installAbortController.signal,
-              onProgress,
-            });
+        const launcherFolder = await installedLauncherFolder();
+        let marker: Awaited<ReturnType<typeof installClient>>;
+        if (sourceKind === "direct") {
+          marker = await adoptExistingClient({
+            root: sourceRoot,
+            shimPath: resolveBundledShimPath(),
+            vivoxProxyPath: resolveBundledVivoxProxyPath(),
+            vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
+            launcherVersion: app.getVersion(),
+            launcherFolder,
+            onProgress,
+          });
+        } else {
+          // Best-effort: only lets the copy resume after a restart.
+          await configStore.setPendingInstallRoot(installationRoot).catch(() => undefined);
+          marker = await installClient({
+            sourceRoot,
+            destinationRoot: installationRoot,
+            shimPath: resolveBundledShimPath(),
+            vivoxProxyPath: resolveBundledVivoxProxyPath(),
+            vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
+            launcherVersion: app.getVersion(),
+            launcherFolder,
+            signal: installAbortController.signal,
+            onProgress,
+          });
+        }
         await configStore.setInstallation({
           installId: marker.installId,
           clientBuildId: marker.clientBuildId,
@@ -1061,9 +1207,18 @@ function registerIpc(): void {
         return { ok: true, value: { installationRoot } };
       } catch (error) {
         const cancelled = installAbortController.signal.aborted;
-        const result = operationError<{ installationRoot: string }>(error);
-        result.cancelled = cancelled;
-        phase = "error";
+        let result: OperationResult<{ installationRoot: string }>;
+        if (cancelled) {
+          lastErrorRaw = null;
+          result = { ok: false, cancelled: true };
+        } else {
+          result = operationError<{ installationRoot: string }>(error);
+        }
+        // The copy resumes on the next attempt, so the selection stays. A client
+        // that was already installed before this attempt stays playable.
+        phase = await installationRoot().catch(() => null)
+          ? "ready"
+          : sourceKind === "copy-required" ? "destination-selected" : "source-selected";
         progress = null;
         await broadcastSnapshot();
         return result;
@@ -1094,7 +1249,7 @@ function registerIpc(): void {
   ipcMain.handle(
     IPC_CHANNELS.play,
     trustedHandler(async (): Promise<OperationResult<{ pid: number }>> => {
-      if (hasLauncherUpdate(launcherUpdate.state)) {
+      if (updateRequired || launcherUpdateBlocksPlay(launcherUpdate.state)) {
         return { ok: false, error: MAIN_COPY[currentLocale].update.required };
       }
       if (phase !== "ready" || debugSettingWrite || diagnosticWorkInProgress()) return { ok: false, error: MAIN_COPY[currentLocale].clientNotReady };
@@ -1116,6 +1271,7 @@ function registerIpc(): void {
       // vector and the signing key are both replaced before attestation runs.
       rotateIdentity();
       lastErrorRaw = null;
+      inputProfileRecovery = null;
       await broadcastSnapshot();
       // A discovered update must be fully downloaded and installed before
       // starting the game; launching with a partially updated asset set is unsafe.
@@ -1147,9 +1303,15 @@ function registerIpc(): void {
           launcherVersion: app.getVersion(),
           diagnostics: diagnosticLaunch?.hooks,
           presence: discordPresence,
+          // Shown by the snapshot that onExit broadcasts right after.
+          onEarlyExit: (message) => { lastErrorRaw = message; },
           // Best-effort hardware fingerprint; the server hashes it. A failure
           // must never block a launch, so it degrades to no HWID signal.
-          hwid: await collectHwid().catch(() => ({})),
+          fallbackHwid: () => collectHwid(),
+          onInputProfileRecovered: (recovery) => {
+            inputProfileRecovery = recovery;
+            void broadcastSnapshot();
+          },
           onExit: () => {
             gamePid = null;
             phase = "ready";
@@ -1218,6 +1380,7 @@ function registerIpc(): void {
       if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
         return { ok: false, error: MAIN_COPY[currentLocale].update.gameRunning };
       }
+      if (installAbortController) return { ok: false, error: MAIN_COPY[currentLocale].installationInProgress };
       const failure = launcherUpdate.install();
       if (!failure) return { ok: true };
       return { ok: false, error: MAIN_COPY[currentLocale].update[failure] };
@@ -1438,12 +1601,18 @@ async function initialize(): Promise<void> {
   assetSyncPackVersion = assetState?.packVersion ?? null;
   assetSyncLastAt = assetState?.syncedAt ?? null;
   if (config.installation) {
+    phase = "ready";
     try {
       await validateInstalledClient(config.installation);
-      phase = "ready";
     } catch (error) {
-      phase = "error";
-      lastErrorRaw = rawErrorMessage(error);
+      lastErrorRaw = await lostWithLauncherFolder(config.installation.root, await installedLauncherFolder())
+        ? "Le jeu était installé dans le dossier de ROTK Launcher, que chaque mise à jour ou désinstallation du launcher supprime. Si tu l’as déplacé, sélectionne-le à son nouvel emplacement ; sinon, réinstalle-le ailleurs, par exemple dans C:\\Games\\ROTK."
+        : rawErrorMessage(error);
+      // A drive not mounted yet or a locked file can clear up: Play checks
+      // again. A damaged installation sends the player to the setup panel.
+      const driveReady = await stat(parse(config.installation.root).root).then(() => true, () => false);
+      const systemError = typeof (error as NodeJS.ErrnoException | null)?.code === "string";
+      if (driveReady && !systemError) phase = "error";
     }
   }
   startupLog.mark("installation-checked", `phase=${phase}`);
@@ -1453,6 +1622,9 @@ async function initialize(): Promise<void> {
     // Keep the installation error if there is one.
     lastErrorRaw ??= `Un fichier du launcher est absent : ${quarantined[0]}. Ton antivirus l’a peut-être mis en quarantaine : restaure-le depuis Sécurité Windows ou réinstalle le launcher.`;
   }
+  if (config.installation && phase === "ready") {
+    void cleanupInstallLeftovers(config.installation.root).catch(() => undefined);
+  }
   launcherUpdate = new LauncherUpdateService({
     // LOCAL EDIT: this is a patched build; an official update would replace
     // it with the unpatched launcher. The updater is therefore inert here,
@@ -1461,6 +1633,7 @@ async function initialize(): Promise<void> {
     // `app.isPackaged ? electronUpdater.autoUpdater : null` below.
     updater: null,
     onChange: () => void broadcastSnapshot(),
+    onDownloadError: (code) => startupLog.mark("launcher-update-failed", code),
   });
   diagnostics = new DiagnosticController({ directory: join(app.getPath("userData"), "diagnostics"),
     helperPath: resolveBundledDiagnosticsPath(), knownSecrets: () => Object.values(playerKeys).filter((key): key is string => typeof key === "string"),
@@ -1475,6 +1648,9 @@ async function initialize(): Promise<void> {
       assetSyncEnabled: context.assetSyncEnabled === true, assetPackVersion: context.assetPackVersion,
       assetState: await assetSync.readState().catch(() => null) }),
     onDebugChange: () => { void broadcastSnapshot(); },
+    // The player sees the reason; startup.log keeps the error behind it.
+    onDebugFailure: (code, reason, error) => startupLog.mark(code, redactDiagnosticText([reason,
+      (error as NodeJS.ErrnoException | null)?.code, error instanceof Error ? error.message : String(error)].filter(Boolean).join(" | "))),
     onChange: (state) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC_CHANNELS.diagnosticsChanged, state);
     } });
@@ -1550,7 +1726,6 @@ process.on("uncaughtException", (error) => {
   startupLog.mark("uncaught-exception", error.message);
   void diagnostics?.recordLauncherError("launcher_uncaught_exception", error).catch(() => undefined);
   lastErrorRaw = `Erreur launcher ${randomUUID().slice(0, 8)} : ${error.message}`;
-  phase = "error";
   void broadcastSnapshot();
 });
 

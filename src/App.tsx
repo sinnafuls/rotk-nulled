@@ -6,7 +6,7 @@ import { LauncherFooter } from "./components/LauncherFooter";
 import { NewsCarousel } from "./components/NewsCarousel";
 import { PlayerIdentityPanel } from "./components/PlayerIdentityPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { hasLauncherUpdate } from "../shared/launcher-update";
+import { hasLauncherUpdate, launcherUpdateBlocksPlay } from "../shared/launcher-update";
 import { LauncherUpdatePrompt } from "./components/LauncherUpdatePrompt";
 import { WindowChrome } from "./components/WindowChrome";
 import { useI18n } from "./i18n";
@@ -74,13 +74,25 @@ export default function App() {
     void window.rotk.detectSource();
   }, [setupOpen, detectAttempted, snapshot]);
 
+  const operationInFlight = useRef(false);
+  // Back from Steam after installing H1Z1: look for the client again.
+  useEffect(() => {
+    const retry = () => setDetectAttempted(false);
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, []);
+
   const perform = useCallback(async (operation: () => Promise<OperationResult<unknown>>) => {
+    // A second click while an operation runs must not release `busy` early.
+    if (operationInFlight.current) return;
+    operationInFlight.current = true;
     setBusy(true);
     setTransientError(null);
     try {
       const result = await operation();
       if (!result.ok && !result.cancelled) setTransientError(result.error ?? copy.app.operationFailed);
     } finally {
+      operationInFlight.current = false;
       setBusy(false);
     }
   }, [copy.app.operationFailed]);
@@ -115,8 +127,10 @@ export default function App() {
   const selectDestination = () => perform(() => window.rotk.selectDestination());
   const install = () => perform(() => window.rotk.install());
   const play = () => perform(() => window.rotk.play());
+  const error = snapshot.error ?? transientError;
+  const notice = error ? null : snapshot.notice;
   const onPrimary = () => {
-    if (hasLauncherUpdate(snapshot.launcherUpdate) || snapshot.updateRequired) {
+    if (launcherUpdateBlocksPlay(snapshot.launcherUpdate) || snapshot.updateRequired) {
       setUpdatePromptOpen(true);
       if (!hasLauncherUpdate(snapshot.launcherUpdate)) void window.rotk.checkLauncherUpdate();
     }
@@ -132,13 +146,14 @@ export default function App() {
       <WindowChrome appVersion={snapshot.appVersion} />
       <NewsCarousel updates={snapshot.updates} />
       <GlobalActivityCenter snapshot={snapshot} />
-      {(transientError || snapshot.error) && (
-        <div className="error-toast" role="alert">
-          <strong>{copy.app.operationInterrupted}</strong>
-          <span>{snapshot.error ?? transientError}</span>
+      {(error || notice) && (
+        <div className="error-toast" role={error ? "alert" : "status"}>
+          <strong>{error ? copy.app.operationInterrupted : copy.app.notice}</strong>
+          <span>{error ?? notice}</span>
           <button type="button" aria-label={copy.app.closeError} onClick={() => {
             setTransientError(null);
-            void window.rotk.dismissError();
+            // A renderer-only error must not dismiss the notice behind it.
+            if (snapshot.error || notice) void window.rotk.dismissError();
           }}>×</button>
         </div>
       )}
@@ -195,6 +210,8 @@ export default function App() {
         onClose={() => setSetupOpen(false)}
         onSelectSource={() => void selectSource()}
         onSelectDestination={() => void selectDestination()}
+        onChooseDrive={(root) => void perform(() => window.rotk.chooseInstallDrive(root))}
+        onInstallWithSteam={() => void perform(() => window.rotk.openSteamInstall())}
         onInstall={() => void install()}
         onCancel={() => void window.rotk.cancelInstall()}
         onVerifyAssets={() => void perform(() => window.rotk.verifyAssets())}

@@ -41,7 +41,7 @@ static void unit_tests(void) {
     memset(request, 0x5a, sizeof(request));
     write32(request, REQUEST_TYPE_OFFSET, REQUEST_SESSION_SET_3D_POSITION);
     memcpy(expected, request, sizeof(request));
-    write32(expected, POSITION_DISPOSITION_OFFSET, POSITION_NO_REPLY_REQUIRED);
+    write32(expected, POSITION_DISPOSITION_OFFSET, POSITION_REPLY_REQUIRED);
     assert(vx_issue_request3(request, &count) == 0);
     assert(original_calls == 1 && last_request == request && count == 1);
     assert(!memcmp(request, expected, sizeof(request)));
@@ -121,7 +121,7 @@ static void sdk_test(const char *path, const char *proxy_path) {
         assert(!strcmp(before, after));
         assert(g_free(before) == 0 && g_free(after) == 0);
         write32(request, POSITION_DISPOSITION_OFFSET, 0U);
-        /* No login/channel: a real SDK error must survive the no-reply flag. */
+        /* No login/channel: keep real errors and the reply-required policy. */
         assert(issue(request, &count) == 0);
         ULONGLONG deadline = GetTickCount64() + 5000U;
         BOOL received = FALSE;
@@ -136,7 +136,7 @@ static void sdk_test(const char *path, const char *proxy_path) {
             assert(read32(message, RESPONSE_RETURN_CODE_OFFSET) != 0U);
             assert(read32(message, RESPONSE_STATUS_CODE_OFFSET) != 0U);
             void *actual = NULL; memcpy(&actual, (uint8_t *)message + RESPONSE_REQUEST_OFFSET, sizeof(actual));
-            assert(actual == request && read32(actual, POSITION_DISPOSITION_OFFSET) == 1U);
+            assert(actual == request && read32(actual, POSITION_DISPOSITION_OFFSET) == 0U);
             assert(destroy(message) == 0);
             received = TRUE; break;
         }

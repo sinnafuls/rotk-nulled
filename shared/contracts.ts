@@ -29,6 +29,13 @@ export interface InstallProgress {
   currentFile: string;
 }
 
+export interface InstallDrive {
+  /** Drive root, e.g. `D:\`. */
+  root: string;
+  freeBytes: number;
+  totalBytes: number;
+}
+
 export interface InstallSelection {
   sourceRoot: string | null;
   destinationRoot: string | null;
@@ -147,6 +154,8 @@ export interface LauncherSnapshot {
   integrityCheck: IntegrityCheckSummary | null;
   progress: InstallProgress | null;
   error: string | null;
+  /** Something the launcher repaired on its own that the player should know. */
+  notice: string | null;
   gamePid: number | null;
   /** The server refused a launch for an out-of-date launcher; Play is blocked
    *  until a newer version is installed. */
@@ -156,11 +165,22 @@ export interface LauncherSnapshot {
   canPlay: boolean;
 }
 
+/** Why a Debug report was not sent. Stable codes, shown to the player. */
+export type DebugReportFailureReason =
+  | "collection"
+  | "timeout"
+  | "network"
+  | "rejected"
+  | "account-changed"
+  | "other";
+
 export interface DebugSessionSummary {
   enabled: boolean;
   status: "idle" | "recording" | "preparing" | "ready" | "error";
   fileName: string | null;
   error: string | null;
+  /** Set with the "error" status. httpStatus when the ROTK server answered. */
+  failure?: { reason: DebugReportFailureReason; httpStatus: number | null } | null;
 }
 
 // LOCAL EDIT (diagnostic): the one-click network check shown in the footer.
@@ -208,7 +228,12 @@ export interface RotkLauncherApi {
   detectSource(): Promise<OperationResult<{ sourceRoot: string | null }>>;
   selectSource(): Promise<OperationResult<{ sourceRoot: string }>>;
   selectDestination(): Promise<OperationResult<{ destinationRoot: string }>>;
+  /** Opens Steam on the H1Z1 install page. */
+  openSteamInstall(): Promise<OperationResult>;
   dismissError(): Promise<void>;
+  listInstallDrives(): Promise<InstallDrive[]>;
+  /** Installs into `<drive>\Games\ROTK`. */
+  chooseInstallDrive(root: string): Promise<OperationResult<{ destinationRoot: string }>>;
   install(): Promise<OperationResult<{ installationRoot: string }>>;
   /** LOCAL EDIT (diagnostic): probes DNS, the HTTPS API, the gateway and the
    *  UDP login ports of the selected environment. Never blocks Play. */
@@ -248,7 +273,10 @@ export const IPC_CHANNELS = {
   detectSource: "launcher:detect-source",
   selectSource: "launcher:select-source",
   selectDestination: "launcher:select-destination",
+  openSteamInstall: "launcher:open-steam-install",
   dismissError: "launcher:dismiss-error",
+  listInstallDrives: "launcher:list-install-drives",
+  chooseInstallDrive: "launcher:choose-install-drive",
   install: "launcher:install",
   cancelInstall: "launcher:cancel-install",
   play: "launcher:play",

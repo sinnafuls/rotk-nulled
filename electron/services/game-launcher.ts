@@ -1,24 +1,24 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { syntheticLogsRoot } from "./synthetic-identity.js";
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-
-// LOCAL EDIT: the game's command line must not carry the Windows user name or
-// the install id; every launch uses a fresh anonymous logs root instead.
-let currentLogsRoot = syntheticLogsRoot();
+import { copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+let currentLogsRoot = syntheticLogsRoot();
+
 import { retryFs } from "./fs-safe.js";
-import { installAnticheatModule, removeAnticheatModule } from "./anticheat-module.js";
+import { promisify } from "node:util";
 import type { InstalledClientConfig, LauncherConfig } from "./config-store.js";
 import type { RuntimeConfig } from "./runtime-config.js";
 import { serverList } from "./runtime-config.js";
-import { GAME_LOCALE, synchronizeClientConfig, synchronizeUserOptions, validateLocalCreateSessionUrl } from "./client-config.js";
+import { GAME_LOCALE, synchronizeClientConfig, synchronizeUserOptions, synchronizeGraphicsOptions, validateLocalCreateSessionUrl } from "./client-config.js";
 import type { AppLocale } from "../../shared/locale.js";
 import { validateInstallDestination } from "./path-policy.js";
 import type { PlayerIdentity } from "./player-identity.js";
 import { startLocalSessionGateway } from "./session-gateway.js";
+import { syntheticLogsRoot } from "./synthetic-identity.js";
+import { installAnticheatModule, removeAnticheatModule } from "./anticheat-module.js";
 import { readInstallationMarker } from "./installer.js";
+import { assertVisualCppRuntime } from "./visual-cpp-runtime.js";
 import {
   assertLaunchTicketFresh,
   createLaunchTicket,
@@ -29,10 +29,16 @@ import {
   type GameplayPatchMode,
 } from "./gameplay-patch.js";
 import { assertVivoxCompatibility, deployVivoxCompatibility } from "./vivox-client.js";
+import { assertSteamShim, deploySteamShim } from "./steam-shim.js";
 import { prepareInterfaceInputProfile } from "./interface-input-profile.js";
+import { recoverInputProfile, type InputProfileRecovery } from "./input-profile-recovery.js";
 import { prepareWeaponStanceProfile, WEAPON_STANCE_ENABLED } from "./weapon-stance-profile.js";
 
 const GAME_STARTUP_STABILITY_MS = 3_000;
+// Past the stability window the launch is reported as started. When the game
+// then closes this soon after its spawn with anything but exit code 0, that
+// code is the only clue the player can pass on.
+const GAME_EARLY_EXIT_MS = 60_000;
 
 /**
  * What one attestation attempt produced.
@@ -49,7 +55,7 @@ export type AttestationOutcome =
       readonly status: "attested";
       readonly block: unknown;
       /**
-       * The fingerprint read for the slots the challenge asked (#320 §B). It
+       * The fingerprint read for the slots the challenge asked (#320 Â§B). It
        * is what the TPM proof inside the block was signed over, so the ticket
        * request must carry exactly this object and not a fingerprint read at
        * another time.
@@ -69,7 +75,7 @@ export interface LaunchRequest {
   config: LauncherConfig;
   identity: PlayerIdentity;
   runtime: RuntimeConfig;
-  /** Launcher UI language; the game temporarily remains in English. */
+  /** Launcher UI language, also used to select the game's launch locale. */
   locale: AppLocale;
   logsRoot: string;
   bundledShimPath: string;
@@ -94,13 +100,25 @@ export interface LaunchRequest {
   attest?: () => Promise<AttestationOutcome>;
   /** This launcher's version, sent so the server's update gate can act. */
   launcherVersion?: string;
-  /** Raw hardware fingerprint; the server hashes it (see machine-identity.ts). */
-  hwid?: Record<string, string>;
+  /**
+   * Raw hardware fingerprint for a launch that could not attest (an attested
+   * launch already carries one). Only called when needed: it runs PowerShell.
+   */
+  fallbackHwid?: () => Promise<Record<string, string>>;
   /** Best-effort telemetry only. Diagnostic failures never control the game lifecycle. */
   diagnostics?: GameLaunchDiagnostics;
   /** Optional local presence; failures never control the game lifecycle. */
   presence?: { start(pid: number): void; stop(): void };
+  /** A damaged InputProfile_User.xml was set aside so the launch could go on. */
+  onInputProfileRecovered?(recovery: InputProfileRecovery): void;
   onExit(exitCode: number | null): void;
+  /**
+   * Called just before `onExit` when a launch that was reported as started
+   * ends within GAME_EARLY_EXIT_MS with anything but exit code 0. The play
+   * request has already returned success by then, so this message is the only
+   * way to tell the player.
+   */
+  onEarlyExit?(message: string): void;
 }
 
 export interface GameLaunchDiagnostics {
@@ -122,16 +140,18 @@ function diagnosticCallback(callback: (() => void) | undefined): void {
  * enforced refusal can name the real cause. The version and HWID ride along
  * regardless, so the update gate and HWID capture work even with no attestation.
  */
-function ticketRequestOptions(
+async function ticketRequestOptions(
   request: LaunchRequest,
   outcome: AttestationOutcome,
-): { attestation?: unknown; attestationUnavailableReason?: string; launcherVersion?: string; hwid?: Record<string, string> } {
+): Promise<{ attestation?: unknown; attestationUnavailableReason?: string; launcherVersion?: string; hwid?: Record<string, string> }> {
   const base: { launcherVersion?: string; hwid?: Record<string, string> } = {};
   if (request.launcherVersion) base.launcherVersion = request.launcherVersion;
   // An attested launch answers the slots its challenge named, and its TPM proof
   // is bound to that exact vector; the fingerprint read before the launch is
   // the fallback for a launch that could not attest.
-  const hwid = outcome.status === "attested" && outcome.hwid !== undefined ? outcome.hwid : request.hwid;
+  const hwid = outcome.status === "attested" && outcome.hwid !== undefined
+    ? outcome.hwid
+    : await request.fallbackHwid?.().catch(() => ({}));
   if (hwid && Object.keys(hwid).length > 0) base.hwid = hwid;
   if (outcome.status === "attested") return { ...base, attestation: outcome.block };
   if (outcome.status === "unavailable") {
@@ -160,6 +180,44 @@ export async function validateInstalledClient(installation: InstalledClientConfi
     throw new Error("La sauvegarde de steam_api64.dll est absente. Réimporte le client.");
   }
   return root;
+}
+
+// CSV rows start with the quoted image name whatever the Windows language;
+// "no task" is a localized INFO line instead.
+async function isImageRunning(imageName: string): Promise<boolean> {
+  try {
+    const { stdout } = await promisify(execFile)(
+      "tasklist",
+      ["/FI", `IMAGENAME eq ${imageName}`, "/NH", "/FO", "CSV"],
+      { windowsHide: true, timeout: 5_000 },
+    );
+    const expected = `"${imageName.toLowerCase()}"`;
+    return stdout.split("\n").some((line) => line.trim().toLowerCase().startsWith(`${expected},`));
+  } catch {
+    return false;
+  }
+}
+
+// A running exe can't be opened for writing (EBUSY). Catches a game left open
+// by a previous launcher session, which GameLauncher.isRunning() can't see.
+export async function assertExecutableNotRunning(executablePath: string, attempts = 5): Promise<void> {
+  // An antivirus scan can hold the exe for a moment too; a running game stays busy.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await (await open(executablePath, "r+")).close();
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // A denied open says nothing about the game: ask the process list instead.
+      if ((code === "EPERM" || code === "EACCES") && await isImageRunning(basename(executablePath))) {
+        throw new Error("H1Z1 est déjà lancé depuis cette installation.");
+      }
+      // Missing or read-only executables are reported by the regular checks.
+      if (code !== "EBUSY") return;
+      if (attempt >= attempts) throw new Error("H1Z1 est déjà lancé depuis cette installation.");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100 * 2 ** (attempt - 1)));
+    }
+  }
 }
 
 function sanitizedEnvironment(
@@ -194,30 +252,28 @@ async function prepareClient(
   // All subsequent I/O and the spawned process use the same physical root that
   // passed policy validation. This prevents a logical junction alias from
   // steering configuration and execution to a different tree.
-  const activeShimPath = join(root, "steam_api64.dll");
-  await retryFs(() => copyFile(request.bundledShimPath, activeShimPath));
+  await assertExecutableNotRunning(join(root, "H1Z1.exe"));
+  await assertSteamShim(root, request.bundledShimPath);
   await assertVivoxCompatibility(root);
   // The attestation pass has already installed or removed the shotgun sprint
   // proxy for the mode the server directed; preparation only rechecks it so a
   // concurrent drift cannot ride into the process.
   await assertGameplayPatchState(root, clientPatchMode);
 
-  await prepareWeaponStanceProfile(root,
-    join(request.logsRoot, request.config.installation!.installId, "input-profile"), WEAPON_STANCE_ENABLED);
-  await prepareInterfaceInputProfile(
-    root,
-    join(request.logsRoot, request.config.installation!.installId, "input-profile"),
-  );
+  const inputProfileState = join(request.logsRoot, request.config.installation!.installId, "input-profile");
+  // Both steps below refuse a profile the game left truncated: recover it first.
+  const recovery = await recoverInputProfile(root, inputProfileState);
+  if (recovery) request.onInputProfileRecovered?.(recovery);
+  await prepareWeaponStanceProfile(root, inputProfileState, WEAPON_STANCE_ENABLED);
+  await prepareInterfaceInputProfile(root, inputProfileState);
 
   const configPath = join(root, "ClientConfig.ini");
   const configBackupPath = join(root, "ClientConfig.original.ini");
   if (!existsSync(configBackupPath)) await copyFile(configPath, configBackupPath);
-  const synchronized = synchronizeClientConfig(
-    await readFile(configPath, "utf8"),
-    request.runtime,
-    localCreateSessionUrl,
-  );
-  await writeFile(configPath, synchronized, "ascii");
+  const currentConfig = await readFile(configPath, "utf8");
+  const synchronized = synchronizeClientConfig(currentConfig, request.runtime, localCreateSessionUrl);
+  // utf8, not ascii: an ascii write turned a BOM into a stray 0xFF byte.
+  if (synchronized !== currentConfig) await writeFile(configPath, synchronized, "utf8");
   await writeFile(join(root, "steam_persona_name.txt"), `${launchIdentity.displayName}\n`, "utf8");
 
   await updateUserOptions(root, synchronizeUserOptions);
@@ -226,8 +282,10 @@ async function prepareClient(
   if (existsSync(battleyePath)) {
     const current = await readFile(battleyePath, "utf8");
     const patched = current.replace(/MasterPort\s+\d+/i, "MasterPort 20099");
-    if (patched !== current) await writeFile(battleyePath, patched, "ascii");
+    if (patched !== current) await writeFile(battleyePath, patched, "utf8");
   }
+
+  await updateUserOptions(root, synchronizeGraphicsOptions);
   return root;
 }
 
@@ -315,13 +373,29 @@ function windowsExitCode(code: number | null): string {
   return `0x${(code >>> 0).toString(16).padStart(8, "0").toUpperCase()}`;
 }
 
+// STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION (ntstatus.h): "An Application
+// Control policy has blocked this file." Smart App Control is one of them.
+function exitCodeHint(code: number | null): string {
+  if (windowsExitCode(code) !== "0xC0E90002") return "";
+  return " Windows a bloqué un fichier du jeu avec une stratégie App Control : "
+    + "vérifie le Contrôle intelligent des applications dans Sécurité Windows > Contrôle des applications et du navigateur.";
+}
+
+function earlyExitMessage(code: number | null, elapsedMs: number): string | null {
+  // Zero is a normal close, as in the diagnostic reports (SUCCESS).
+  if (code === 0 || elapsedMs >= GAME_EARLY_EXIT_MS) return null;
+  const seconds = Math.max(1, Math.floor(elapsedMs / 1_000));
+  return `H1Z1 s’est fermé ${seconds} s après son lancement (code Windows ${windowsExitCode(code)}).${exitCodeHint(code)} `
+    + "Si tu ne l’as pas fermé toi-même, relance le jeu ; si ça recommence, Debug (dans les réglages) permet d’envoyer un rapport à ROTK.";
+}
+
 function waitForStableStartup(
   child: ChildProcess,
   durationMs = GAME_STARTUP_STABILITY_MS,
 ): Promise<void> {
   if (child.exitCode !== null) {
     return Promise.reject(new Error(
-      `H1Z1 s’est fermé pendant son initialisation (code Windows ${windowsExitCode(child.exitCode)}).`,
+      `H1Z1 s’est fermé pendant son initialisation (code Windows ${windowsExitCode(child.exitCode)}).${exitCodeHint(child.exitCode)}`,
     ));
   }
   return new Promise((resolve, reject) => {
@@ -333,7 +407,7 @@ function waitForStableStartup(
     const onExit = (code: number | null): void => {
       cleanup();
       reject(new Error(
-        `H1Z1 s’est fermé pendant son initialisation (code Windows ${windowsExitCode(code)}).`,
+        `H1Z1 s’est fermé pendant son initialisation (code Windows ${windowsExitCode(code)}).${exitCodeHint(code)}`,
       ));
     };
     const onError = (error: Error): void => {
@@ -364,11 +438,13 @@ export class GameLauncher {
     const installation = request.config.installation;
     if (!installation) throw new Error("Installe d’abord le client ROTK.");
     const installationRoot = await validateInstalledClient(installation);
-    // LOCAL EDIT: a fresh anonymous log directory per launch (see
-    // buildLaunchArguments); the launcher's own logs stay where they were.
-    currentLogsRoot = syntheticLogsRoot();
-    const localLogs = join(currentLogsRoot, "local");
-    const failureLogs = join(currentLogsRoot, "failure");
+    // Before attestation and the ticket, which are single-use.
+    await assertExecutableNotRunning(join(installationRoot, "H1Z1.exe"));
+    // Checked before the voice repair, attestation and ticket: on a Visual C++
+    // runtime too old for rotkc.dll, H1Z1 can crash as it starts.
+    await assertVisualCppRuntime(installationRoot);
+    const localLogs = join(request.logsRoot, installation.installId, "local");
+    const failureLogs = join(request.logsRoot, installation.installId, "failure");
     await mkdir(localLogs, { recursive: true });
     await mkdir(failureLogs, { recursive: true });
 
@@ -393,6 +469,10 @@ export class GameLauncher {
       request.bundledVivoxProxyPath,
       request.bundledVivoxRuntimePath,
     );
+    // Attestation expects the bundled shim's hash, so a shim shipped by a
+    // launcher update must land before it measures; otherwise the first
+    // launch after that update reports a mismatch for every honest player.
+    await deploySteamShim(installationRoot, request.bundledShimPath);
 
     // Integrity attestation runs before the ticket exists: the whole point is
     // that a tampered installation never obtains one.
@@ -405,7 +485,7 @@ export class GameLauncher {
     let launchIdentity = await createLaunchTicket(
       request.identity.playerKey,
       request.runtime.launchTicketUrl,
-      ticketRequestOptions(request, outcome),
+      await ticketRequestOptions(request, outcome),
     );
     let sessionGateway = await startLocalSessionGateway(launchIdentity.ticket);
 
@@ -437,7 +517,7 @@ export class GameLauncher {
         launchIdentity = await createLaunchTicket(
           request.identity.playerKey,
           request.runtime.launchTicketUrl,
-          ticketRequestOptions(request, refreshed),
+          await ticketRequestOptions(request, refreshed),
         );
         sessionGateway = await startLocalSessionGateway(launchIdentity.ticket);
         await prepareClient(
@@ -476,6 +556,8 @@ export class GameLauncher {
         throw new Error("Windows n’a pas retourné l’identifiant du processus H1Z1.");
       }
       this.child = child;
+      const spawnedAt = performance.now();
+      let started = false;
       for (const stream of ["stdout", "stderr"] as const) {
         child[stream]?.setEncoding("utf8");
         child[stream]?.on("data", (text: string) => diagnosticCallback(() => request.diagnostics?.onOutput(stream, text)));
@@ -486,13 +568,20 @@ export class GameLauncher {
       const finalize = (code: number | null, signal: NodeJS.Signals | null = null): void => {
         if (finalized) return;
         finalized = true;
+        // A startup failure is already reported by the rejected launch below.
+        const earlyExit = started ? earlyExitMessage(code, performance.now() - spawnedAt) : null;
         try { request.presence?.stop(); } catch { /* Presence is optional. */ }
         if (this.child === child) this.child = null;
         void sessionGateway.close().catch(() => undefined);
         // Preserve the local gateway/game lifecycle, but keep the launcher alive
         // until the final report has been persisted when its window was closed.
         const collected = Promise.resolve().then(() => request.diagnostics?.onExit(code, signal));
-        void collected.catch(() => undefined).finally(() => request.onExit(code));
+        void collected.catch(() => undefined).finally(() => {
+          if (earlyExit) {
+            try { request.onEarlyExit?.(earlyExit); } catch { /* The message must not block the exit callback. */ }
+          }
+          request.onExit(code);
+        });
       };
       child.once("exit", (code, signal) => finalize(code, signal));
       child.once("error", () => finalize(null));
@@ -501,6 +590,7 @@ export class GameLauncher {
       // 1.4.0: H1Z1 exited with 0xc00000fd immediately after spawn, while the
       // renderer had already switched to the running state.
       await waitForStableStartup(child);
+      started = true;
       if (!finalized) {
         try { request.presence?.start(child.pid); } catch { /* Presence is optional. */ }
       }
@@ -521,4 +611,5 @@ export const gameLauncherInternals = {
   buildLaunchArguments,
   validateVoiceGrantOrigin,
   windowsExitCode,
+  earlyExitMessage,
 };

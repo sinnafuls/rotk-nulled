@@ -76,7 +76,7 @@ static DWORD WINAPI serve(void *unused) {
         char input[2048]; assert(recv(client, input, sizeof(input), 0) > 0);
         ++attempts; SetEvent(received);
         assert(WaitForSingleObject(release_response, 5000U) == WAIT_OBJECT_0);
-        if (scenario == 9) { closesocket(client); continue; }
+        if (scenario == 9) { closesocket(client); if (attempt == expected - 1U) closesocket(listener); continue; }
         if (scenario == 10) {
             const char response[] = "HTTP/1.1 503 Busy\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             send_all(client, response, sizeof(response) - 1U);
@@ -173,7 +173,7 @@ int main(int argc, char **argv) {
             BYTE leave[0x38U] = {0}; write_pointer(leave, 0x30U, "sip:confctl-g-test.group@domain"); voice_async_retire(leave, 0x15U);
         }
         SetEvent(release_response);
-        assert(WaitForSingleObject(notified, 6000U) == WAIT_OBJECT_0);
+        assert(WaitForSingleObject(notified, scenario == 9 ? 25000U : 6000U) == WAIT_OBJECT_0);
         BOOL success = scenario == 0 || scenario == 1 || scenario == 4 || scenario == 6 || scenario == 11 || scenario == 12;
         if (scenario == 12) {
             assert(voice_async_poll() == NULL && sdk_response);
@@ -206,6 +206,13 @@ int main(int argc, char **argv) {
             assert(g_voice_rooms[0].desired && g_voice_rooms[0].accepted && !g_voice_rooms[0].media_failed && !g_voice_rooms[0].removed);
         }
         if (scenario == 6) {
+            const int transient[] = {1058,1095,5003,5020,5024,5043,5045,5050,10006,10007,10028,10056,10100};
+            for (unsigned t = 0; t < sizeof(transient)/sizeof(transient[0]); ++t) {
+                char xml[320]; snprintf(xml,sizeof(xml),
+                    "<Event type=\"MediaStreamUpdatedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sip:confctl-g-test.group@domain</SessionHandle><StatusCode>%d</StatusCode><State>1</State></Event>",transient[t]);
+                observe_xml_event(xml,20U); assert(g_voice_rooms[0].media_failed && !g_voice_rooms[0].exhausted && !g_voice_rooms[0].removed);
+                voice_async_rejoin(); assert(sdk_calls == calls + 1);
+            }
             observe_xml_event("<Event type=\"MediaStreamUpdatedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sip:confctl-g-test.group@domain</SessionHandle><StatusCode>503</StatusCode><State>1</State></Event>", 20U);
             observe_xml_event("<Event type=\"SessionRemovedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sip:confctl-g-test.group@domain</SessionHandle></Event>", 25U);
             assert(g_voice_rooms[0].media_failed && g_voice_rooms[0].removed);

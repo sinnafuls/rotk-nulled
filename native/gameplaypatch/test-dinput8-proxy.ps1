@@ -25,8 +25,8 @@ if (-not (Test-Path -LiteralPath $proxy -PathType Leaf)) {
     throw "Shotgun sprint proxy not found: $proxy"
 }
 
-$expectedHash = "50FC571D149ADAC1A86470BA79954EA35F713E2D02C8D88EF2BAF22F326F525A"
-$expectedBytes = 44032
+$expectedHash = "E969DEDBB8F7A130449C5D38FD3E4F6FB34BA61ABFDC3D413F63A069D4A7B36E"
+$expectedBytes = 47616
 function Get-Sha256([string]$Path) {
     $stream = [System.IO.File]::OpenRead($Path)
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
@@ -124,7 +124,7 @@ foreach ($forbiddenImport in @(
 $zig = Get-Command -Name "zig" -CommandType Application -ErrorAction Stop
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 & $zig.Source @(
-    "cc",
+    "cc", "-ld3d11", "-ldxgi",
     "-target", "x86_64-windows-gnu",
     "-O2",
     "-Wall",
@@ -142,7 +142,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $zig.Source @(
-    "cc",
+    "cc", "-ld3d11", "-ldxgi",
     "-target", "x86_64-windows-gnu",
     "-O2",
     "-Wall",
@@ -160,7 +160,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $zig.Source @(
-    "cc",
+    "cc", "-ld3d11", "-ldxgi",
     "-target", "x86_64-windows-gnu",
     "-O2",
     "-Wall",
@@ -180,7 +180,7 @@ if ($LASTEXITCODE -ne 0) {
 # Stance uses a bounded RX trampoline and mouse state reads; neither installs
 # an exception handler. Verify the native setter thunk and action lookup too.
 & $zig.Source @(
-    "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "cc", "-ld3d11", "-ldxgi", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
     "-o", $stanceExe, (Join-Path $root "tests\weapon_stance_test.c"), "-luser32"
 )
 if ($LASTEXITCODE -ne 0) { throw "Weapon stance test compilation failed." }
@@ -189,7 +189,7 @@ if ($LASTEXITCODE -ne 0) { throw "Weapon stance test failed." }
 
 $respawnExe = Join-Path $testRoot "respawn_address_test.exe"
 & $zig.Source @(
-    "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "cc", "-ld3d11", "-ldxgi", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
     "-o", $respawnExe, (Join-Path $root "tests\respawn_address_test.c"), "-luser32"
 )
 if ($LASTEXITCODE -ne 0) { throw "CZ respawn test compilation failed." }
@@ -200,7 +200,7 @@ if ($LASTEXITCODE -ne 0) { throw "CZ respawn repair test failed." }
 
 $rebootExe = Join-Path $testRoot "trio_reboot_camera_test.exe"
 & $zig.Source @(
-    "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "cc", "-ld3d11", "-ldxgi", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
     "-o", $rebootExe, (Join-Path $root "tests\trio_reboot_camera_test.c"), "-luser32"
 )
 if ($LASTEXITCODE -ne 0) { throw "Trio reboot camera test compilation failed." }
@@ -209,12 +209,21 @@ if ($LASTEXITCODE -ne 0) { throw "Trio reboot camera test failed." }
 
 $nameplateExe = Join-Path $testRoot "spectator_nameplate_color_test.exe"
 & $zig.Source @(
-    "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "cc", "-ld3d11", "-ldxgi", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
     "-o", $nameplateExe, (Join-Path $root "tests\spectator_nameplate_color_test.c"), "-luser32"
 )
 if ($LASTEXITCODE -ne 0) { throw "Spectator nameplate test compilation failed." }
 & $nameplateExe
 if ($LASTEXITCODE -ne 0) { throw "Spectator nameplate test failed." }
+
+$fpsExe = Join-Path $testRoot "render_fps_test.exe"
+& $zig.Source @(
+    "cc", "-ld3d11", "-ldxgi", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
+    "-o", $fpsExe, (Join-Path $root "tests\render_fps_test.c"), "-ld3d11", "-ldxgi"
+)
+if ($LASTEXITCODE -ne 0) { throw "Native FPS test compilation failed." }
+& $fpsExe
+if ($LASTEXITCODE -ne 0) { throw "Native FPS counter test failed." }
 
 Write-Host "Shotgun sprint, weapon stance, respawn, Trio reboot and spectator nameplate proxy tests passed."
 Write-Host "  Size $actualBytes bytes"

@@ -47,7 +47,7 @@ describe("native Vivox+crouch runtime contract", () => {
       patchSource.indexOf("static uint16_t crouch_blend_weight_hook"),
     );
     const controlRead = patchSource.indexOf(
-      "crouch_read_state_control(",
+      "crouch_read_float_control(",
       sequenceRead,
     );
     const lockStart = patchSource.indexOf(

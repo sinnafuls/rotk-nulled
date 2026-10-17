@@ -32,6 +32,7 @@ export interface Copy {
     initializing: string;
     operationFailed: string;
     operationInterrupted: string;
+    notice: string;
     closeError: string;
   };
   news: {
@@ -157,6 +158,11 @@ export interface Copy {
     detectedBadge: string;
     recommendedBadge: string;
     subfolderHint: string;
+    resumeHint: string;
+    driveLabel: string;
+    driveFree: (gigabytes: number) => string;
+    noClientFound: string;
+    installWithSteam: string;
     choose: string;
     cancelCopy: string;
     createInstall: string;
@@ -227,6 +233,7 @@ const COPY: Record<AppLocale, Copy> = {
       initializing: "INITIALIZING LAUNCHER",
       operationFailed: "The operation failed.",
       operationInterrupted: "OPERATION INTERRUPTED",
+      notice: "NOTICE",
       closeError: "Close",
     },
     news: {
@@ -361,6 +368,11 @@ const COPY: Record<AppLocale, Copy> = {
       detectedBadge: "AUTO-DETECTED",
       recommendedBadge: "RECOMMENDED",
       subfolderHint: "A ROTK subfolder is created automatically in the chosen location — no need to create it yourself.",
+      resumeHint: "You can cancel or close the launcher: the copy picks up where it stopped.",
+      driveLabel: "INSTALL DRIVE",
+      driveFree: (gigabytes) => `${gigabytes} GB free`,
+      noClientFound: "No H1Z1 client was found. Install it with Steam (listed as Z1 Battle Royale), then come back here.",
+      installWithSteam: "INSTALL H1Z1 WITH STEAM",
       choose: "CHOOSE",
       cancelCopy: "CANCEL",
       createInstall: "CREATE SEPARATE COPY",
@@ -377,7 +389,7 @@ const COPY: Record<AppLocale, Copy> = {
         scanning: "Scanning H1Z1 client",
         verifying: "SHA-256 verification",
         configuring: "Applying ROTK client configuration",
-        finalizing: "Atomic finalization",
+        finalizing: "Finishing the installation",
       },
     },
     activity: {
@@ -452,6 +464,7 @@ const COPY: Record<AppLocale, Copy> = {
       initializing: "INITIALISATION DU LAUNCHER",
       operationFailed: "L’opération a échoué.",
       operationInterrupted: "OPÉRATION INTERROMPUE",
+      notice: "INFORMATION",
       closeError: "Fermer",
     },
     news: {
@@ -586,6 +599,11 @@ const COPY: Record<AppLocale, Copy> = {
       detectedBadge: "DÉTECTÉ AUTO",
       recommendedBadge: "RECOMMANDÉ",
       subfolderHint: "Un sous-dossier ROTK est créé automatiquement dans l’emplacement choisi — inutile de le créer toi-même.",
+      resumeHint: "Tu peux annuler ou fermer le launcher : la copie reprendra là où elle s’est arrêtée.",
+      driveLabel: "DISQUE D’INSTALLATION",
+      driveFree: (gigabytes) => `${gigabytes} Go libres`,
+      noClientFound: "Aucun client H1Z1 trouvé. Installe-le avec Steam (sous le nom Z1 Battle Royale), puis reviens ici.",
+      installWithSteam: "INSTALLER H1Z1 AVEC STEAM",
       choose: "CHOISIR",
       cancelCopy: "ANNULER",
       createInstall: "CRÉER UNE COPIE SÉPARÉE",
@@ -602,7 +620,7 @@ const COPY: Record<AppLocale, Copy> = {
         scanning: "Analyse du client H1Z1",
         verifying: "Vérification SHA-256",
         configuring: "Application du client ROTK",
-        finalizing: "Finalisation atomique",
+        finalizing: "Finalisation de l’installation",
       },
     },
     activity: {
@@ -677,6 +695,7 @@ const COPY: Record<AppLocale, Copy> = {
       initializing: "正在初始化启动器",
       operationFailed: "操作失败。",
       operationInterrupted: "操作已中断",
+      notice: "提示",
       closeError: "关闭",
     },
     news: {
@@ -811,6 +830,11 @@ const COPY: Record<AppLocale, Copy> = {
       detectedBadge: "自动检测",
       recommendedBadge: "推荐",
       subfolderHint: "会在所选位置自动创建 ROTK 子文件夹，无需手动创建。",
+      resumeHint: "可以取消或关闭启动器；复制将在下次继续。",
+      driveLabel: "安装磁盘",
+      driveFree: (gigabytes) => `剩余 ${gigabytes} GB`,
+      noClientFound: "未找到 H1Z1 游戏文件。请先通过 Steam 安装（名称为 Z1 Battle Royale），然后返回这里。",
+      installWithSteam: "通过 STEAM 安装 H1Z1",
       choose: "选择",
       cancelCopy: "取消",
       createInstall: "创建独立副本",

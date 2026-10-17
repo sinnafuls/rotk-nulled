@@ -18,6 +18,7 @@ import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import type { AssetSyncProgress } from "../../shared/contracts.js";
 import {
   CRITICAL_CLIENT_FILES,
@@ -35,12 +36,6 @@ import { extractZipEntry, readZipDirectory } from "./zip-archive.js";
  */
 
 export const ASSET_FEED_URL = "https://raw.githubusercontent.com/ROTK-Team/assets/main/feed.json";
-export const ASSET_RELEASE_API_URL = "https://api.github.com/repos/ROTK-Team/assets/releases/latest";
-/**
- * Owners the assets repository is published under. GitHub reports the current
- * one (ROTK-Team since 2026-10-04); h1z1rotk URLs still redirect to it.
- */
-const ASSET_RELEASE_OWNERS = ["ROTK-Team", "h1z1rotk"];
 
 /** Hosts an asset URL may declare in the manifest. */
 const ASSET_URL_HOSTS = new Set(["github.com", "raw.githubusercontent.com"]);
@@ -50,10 +45,8 @@ const ASSET_REDIRECT_HOSTS = new Set([
   "objects.githubusercontent.com",
   "release-assets.githubusercontent.com",
 ]);
-const RELEASE_API_HOSTS = new Set(["api.github.com"]);
 
 const MAX_FEED_BYTES = 1_000_000;
-const MAX_RELEASE_METADATA_BYTES = 1_000_000;
 const MAX_ASSETS = 64;
 /**
  * Also bounds a single extracted zip entry: the main game pack
@@ -65,6 +58,9 @@ const MAX_TOTAL_ASSET_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_ZIP_ENTRIES = 20_000;
 const MAX_REDIRECTS = 5;
 const MANIFEST_TIMEOUT_MS = 10_000;
+const DOWNLOAD_ATTEMPTS = 4;
+// A download that sends nothing for this long is dropped and resumed.
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 const STATE_FILE_NAME = "asset-state.v1.json";
 const CACHE_DIRECTORY_NAME = "asset-cache";
 const BACKUP_DIRECTORY_NAME = "asset-backups";
@@ -94,8 +90,6 @@ export interface AssetManifestEntry {
   size: number;
   installPath: string;
   type: "zip" | "file";
-  /** Exact root entry required for a pack auto-discovered from GitHub Releases. */
-  releasePackEntry?: string;
 }
 
 export interface AssetManifest {
@@ -133,24 +127,8 @@ export interface AssetSyncOutcome {
 export interface AssetSyncServiceOptions {
   userDataDirectory: string;
   feedUrl?: string;
-  releaseApiUrl?: string;
-  discoverReleaseAssets?: boolean;
   fetchImpl?: typeof fetch;
   onProgress?(progress: AssetSyncProgress): void;
-}
-
-interface GitHubReleaseAsset {
-  name?: unknown;
-  size?: unknown;
-  digest?: unknown;
-  browser_download_url?: unknown;
-}
-
-interface GitHubRelease {
-  tag_name?: unknown;
-  draft?: unknown;
-  prerelease?: unknown;
-  assets?: unknown;
 }
 
 function manifestError(reason: string): Error {
@@ -303,95 +281,6 @@ export function parseAssetManifest(value: unknown): AssetManifest {
   return { manifestVersion: 1, packVersion: manifest.packVersion, assets };
 }
 
-/**
- * Make the published GitHub release authoritative for conventional one-pack
- * ZIP payloads. A newly uploaded foo.zip is interpreted strictly as a ZIP
- * containing exactly foo.pack2 at its root and installed in Resources/Assets.
- * GitHub's size and SHA-256 digest become the download contract.
- */
-export function mergeGitHubReleaseAssets(
-  manifest: AssetManifest,
-  value: unknown,
-): AssetManifest {
-  if (!value || typeof value !== "object") throw manifestError("release GitHub inattendue");
-  const release = value as GitHubRelease;
-  if (release.draft === true || release.prerelease === true) {
-    throw manifestError("release GitHub non stable");
-  }
-  if (
-    typeof release.tag_name !== "string"
-    || !/^assets-v[0-9]+\.[0-9]+\.[0-9]+$/.test(release.tag_name)
-  ) {
-    throw manifestError("tag de release GitHub invalide");
-  }
-  if (!Array.isArray(release.assets)) {
-    throw manifestError("liste de release GitHub manquante");
-  }
-  if (release.assets.length > MAX_ASSETS) {
-    throw manifestError("trop d'assets dans la release GitHub");
-  }
-
-  const releaseVersion = release.tag_name.slice("assets-v".length);
-  const byName = new Map(
-    manifest.assets.map((asset) => [
-      asset.name.toLocaleLowerCase("en-US"),
-      asset,
-    ] as const),
-  );
-  const releasePackEntries = new Map<string, string>();
-
-  for (const raw of release.assets as GitHubReleaseAsset[]) {
-    if (!raw || typeof raw !== "object" || typeof raw.name !== "string") continue;
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}\.zip$/i.test(raw.name)) continue;
-
-    const stem = raw.name.slice(0, -".zip".length);
-    const name = stem.toLocaleLowerCase("en-US");
-    const digest = typeof raw.digest === "string" && raw.digest.startsWith("sha256:")
-      ? raw.digest.slice("sha256:".length).toLocaleLowerCase("en-US")
-      : "";
-    if (!isHex64(digest)) {
-      throw manifestError("empreinte GitHub absente (" + raw.name + ")");
-    }
-    if (!Number.isSafeInteger(raw.size) || (raw.size as number) <= 0) {
-      throw manifestError("taille GitHub invalide (" + raw.name + ")");
-    }
-
-    const expectedUrl = ASSET_RELEASE_OWNERS
-      .map((owner) => "https://github.com/" + owner + "/assets/releases/download/"
-        + release.tag_name + "/" + raw.name)
-      .find((url) => url === raw.browser_download_url);
-    if (!expectedUrl) {
-      throw manifestError("URL GitHub inattendue (" + raw.name + ")");
-    }
-
-    byName.set(name, {
-      name,
-      version: releaseVersion,
-      url: expectedUrl,
-      sha256: digest,
-      size: raw.size as number,
-      installPath: "Resources/Assets",
-      type: "zip",
-    });
-    releasePackEntries.set(name, stem + ".pack2");
-  }
-
-  const merged = parseAssetManifest({
-    manifestVersion: 1,
-    packVersion: releaseVersion,
-    assets: [...byName.values()],
-  });
-  return {
-    ...merged,
-    assets: merged.assets.map((asset) => {
-      const releasePackEntry = releasePackEntries.get(
-        asset.name.toLocaleLowerCase("en-US"),
-      );
-      return releasePackEntry ? { ...asset, releasePackEntry } : asset;
-    }),
-  };
-}
-
 function isInstalledFileRecord(value: unknown): value is InstalledFileRecord {
   if (!value || typeof value !== "object") return false;
   const record = value as Partial<InstalledFileRecord>;
@@ -476,6 +365,30 @@ async function ensureFreeSpace(directory: string, downloadBytes: number): Promis
   }
 }
 
+class DownloadStalledError extends Error {
+  constructor(assetName: string) {
+    super(`Le téléchargement de l’asset ${assetName} s’est interrompu.`);
+    this.name = "DownloadStalledError";
+  }
+}
+
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "EPIPE", "ENETUNREACH", "EHOSTUNREACH",
+]);
+
+/** Network drops, stalls and server-side hiccups are worth another attempt. */
+function isRetryableDownloadError(error: unknown): boolean {
+  if (error instanceof DownloadStalledError) return true;
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError") return false;
+  const status = /HTTP (\d{3})/.exec(error.message)?.[1];
+  if (status) return status === "408" || status === "429" || status.startsWith("5");
+  // fetch() failures (DNS, reset, TLS) surface as TypeError("fetch failed"); socket resets carry a code.
+  const code = (error as NodeJS.ErrnoException).code ?? "";
+  return (error instanceof TypeError && error.message === "fetch failed")
+    || code.startsWith("UND_ERR") || NETWORK_ERROR_CODES.has(code);
+}
+
 export class AssetSyncService {
   private readonly statePath: string;
   // Up to 2.0.23 cache and backups lived in userData, on C:, whatever drive the
@@ -486,8 +399,6 @@ export class AssetSyncService {
   private cacheDirectory: string;
   private backupDirectory: string;
   private readonly feedUrl: string;
-  private readonly releaseApiUrl: string;
-  private readonly discoverReleaseAssets: boolean;
   private readonly fetchImpl: typeof fetch;
   private readonly onProgress: (progress: AssetSyncProgress) => void;
   private lastProgressAt = 0;
@@ -499,8 +410,6 @@ export class AssetSyncService {
     this.cacheDirectory = this.legacyCacheDirectory;
     this.backupDirectory = this.legacyBackupDirectory;
     this.feedUrl = options.feedUrl ?? ASSET_FEED_URL;
-    this.releaseApiUrl = options.releaseApiUrl ?? ASSET_RELEASE_API_URL;
-    this.discoverReleaseAssets = options.discoverReleaseAssets ?? true;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.onProgress = options.onProgress ?? (() => undefined);
   }
@@ -612,10 +521,12 @@ export class AssetSyncService {
       newRecords.flatMap((record) =>
         record.installedFiles.map((file) => file.path.toLocaleLowerCase("en-US"))),
     );
+    const restoredFiles: string[] = [];
     for (const record of state?.assets ?? []) {
       for (const file of record.installedFiles) {
         if (!desiredFiles.has(file.path.toLocaleLowerCase("en-US"))) {
           await this.restoreOrRemove(root, file.path);
+          restoredFiles.push(file.path);
         }
       }
     }
@@ -628,6 +539,16 @@ export class AssetSyncService {
       syncedAt: new Date().toISOString(),
       assets: newRecords,
     });
+    // Until the new state is written, an interrupted pass is retried from the
+    // previous one, which still lists these files and needs their backups.
+    // Best-effort: the new state no longer references them either way. A backup
+    // adoptLegacyBackups() could not move is still in the old folder.
+    for (const path of restoredFiles) {
+      for (const backups of [this.backupDirectory, this.legacyBackupDirectory]) {
+        await rm(join(backups, relativeToNative(path)), { force: true, maxRetries: 5, retryDelay: 100 })
+          .catch(() => undefined);
+      }
+    }
     await this.pruneCache(manifest);
     return { status: changed ? "updated" : "up-to-date", packVersion: manifest.packVersion };
   }
@@ -650,6 +571,7 @@ export class AssetSyncService {
         await this.restoreOrRemove(root, file.path);
       }
     }
+    // State first: a retry must never see a state whose backups are gone.
     await rm(this.statePath, { force: true });
     await rm(this.backupDirectory, { recursive: true, force: true });
     await rm(this.legacyBackupDirectory, { recursive: true, force: true });
@@ -684,25 +606,11 @@ export class AssetSyncService {
     signal?.addEventListener("abort", abortUpstream, { once: true });
     if (signal?.aborted) abortUpstream();
     try {
-      // Independent URLs; both requests share the same launch budget. Attach
-      // handlers to both immediately, including when one fails before the other.
-      const [manifest, release] = await Promise.all([
-        (async () => {
-          const response = await this.fetchFollowingRedirects(this.feedUrl, controller.signal);
-          const body = await response.text();
-          if (Buffer.byteLength(body, "utf8") > MAX_FEED_BYTES) throw new Error("Feed too large");
-          return parseAssetManifest(JSON.parse(stripByteOrderMark(body)));
-        })(),
-        this.discoverReleaseAssets ? (async (): Promise<unknown> => {
-          const response = await this.fetchFollowingRedirects(this.releaseApiUrl, controller.signal, RELEASE_API_HOSTS);
-          const body = await response.text();
-          if (Buffer.byteLength(body, "utf8") > MAX_RELEASE_METADATA_BYTES) {
-            throw manifestError("metadonnees de release GitHub trop volumineuses");
-          }
-          return JSON.parse(stripByteOrderMark(body)) as unknown;
-        })() : Promise.resolve(null),
-      ]);
-      return this.discoverReleaseAssets ? mergeGitHubReleaseAssets(manifest, release) : manifest;
+      // feed.json is the only catalog: the GitHub releases API is never read.
+      const response = await this.fetchFollowingRedirects(this.feedUrl, controller.signal);
+      const body = await response.text();
+      if (Buffer.byteLength(body, "utf8") > MAX_FEED_BYTES) throw new Error("Feed too large");
+      return parseAssetManifest(JSON.parse(stripByteOrderMark(body)));
     } catch (error) {
       controller.abort();
       throw error;
@@ -715,15 +623,15 @@ export class AssetSyncService {
   private async fetchFollowingRedirects(
     rawUrl: string,
     signal?: AbortSignal,
-    firstHopHosts: ReadonlySet<string> = ASSET_URL_HOSTS,
+    headers?: Record<string, string>,
   ): Promise<Response> {
     let url = new URL(rawUrl);
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      const allowedHosts = hop === 0 ? firstHopHosts : ASSET_REDIRECT_HOSTS;
+      const allowedHosts = hop === 0 ? ASSET_URL_HOSTS : ASSET_REDIRECT_HOSTS;
       if (url.protocol !== "https:" || !allowedHosts.has(url.hostname)) {
         throw new Error(`Hôte de téléchargement d’assets non autorisé : ${url.hostname}.`);
       }
-      const response = await this.fetchImpl(url.href, { redirect: "manual", signal });
+      const response = await this.fetchImpl(url.href, { redirect: "manual", signal, headers });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
         await response.body?.cancel().catch(() => undefined);
@@ -740,7 +648,8 @@ export class AssetSyncService {
   /**
    * Return the cache path holding the verified payload for `asset`,
    * downloading it first when the cache misses or no longer matches the
-   * expected SHA-256.
+   * expected SHA-256. Downloads go to a `.part` file that survives failures,
+   * so a dropped connection or a launcher restart resumes with a Range request.
    */
   private async ensureCachedAsset(
     asset: AssetManifestEntry,
@@ -756,38 +665,119 @@ export class AssetSyncService {
     }
     await rm(cachePath, { force: true });
 
-    const response = await this.fetchFollowingRedirects(asset.url, signal);
-    if (!response.body) throw new Error(`Téléchargement d’assets refusé (HTTP ${response.status}).`);
-    const temporaryPath = `${cachePath}.${randomUUID()}.tmp`;
-    const hash = createHash("sha256");
-    let receivedBytes = 0;
-    const meter = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        receivedBytes += chunk.byteLength;
-        if (receivedBytes > asset.size) {
-          callback(new Error(`L’asset ${asset.name} dépasse la taille annoncée.`));
-          return;
+    // Progress only moves forward, even when an attempt restarts from zero.
+    let reported = 0;
+    const report = (total: number): void => {
+      if (total > reported) {
+        onBytes(total - reported);
+        reported = total;
+      }
+    };
+    const partialPath = `${cachePath}.part`;
+    // A bad resumed part is worth one clean download before giving up.
+    for (let pass = 1; ; pass += 1) {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await this.downloadToPartial(asset, partialPath, signal, report);
+          break;
+        } catch (error) {
+          if (signal?.aborted || attempt >= DOWNLOAD_ATTEMPTS || !isRetryableDownloadError(error)) throw error;
+          await delay(1_000 * attempt, undefined, { signal });
         }
-        hash.update(chunk);
-        onBytes(chunk.byteLength);
-        callback(null, chunk);
-      },
-    });
+      }
+      if (await sha256File(partialPath) === asset.sha256) break;
+      await rm(partialPath, { force: true });
+      if (pass >= 2) throw new Error(`L’asset ${asset.name} est corrompu (empreinte SHA-256 inattendue).`);
+    }
+    await retryFs(() => rename(partialPath, cachePath));
+    return cachePath;
+  }
+
+  private async downloadToPartial(
+    asset: AssetManifestEntry,
+    partialPath: string,
+    signal: AbortSignal | undefined,
+    report: (total: number) => void,
+  ): Promise<void> {
+    let offset = (await stat(partialPath).catch(() => null))?.size ?? 0;
+    if (offset > asset.size) {
+      await rm(partialPath, { force: true });
+      offset = 0;
+    }
+    if (offset === asset.size) {
+      report(offset);
+      return;
+    }
+
+    const controller = new AbortController();
+    const abortUpstream = (): void => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abortUpstream, { once: true });
+    if (signal?.aborted) abortUpstream();
+    let idleTimer: NodeJS.Timeout | undefined;
+    const armIdleTimer = (): void => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => controller.abort(new DownloadStalledError(asset.name)),
+        DOWNLOAD_IDLE_TIMEOUT_MS,
+      );
+    };
     try {
+      armIdleTimer();
+      const response = await this.fetchFollowingRedirects(
+        asset.url,
+        controller.signal,
+        offset > 0 ? { Range: `bytes=${offset}-`, "Accept-Encoding": "identity" } : undefined,
+      );
+      if (!response.body) throw new Error(`Téléchargement d’assets refusé (HTTP ${response.status}).`);
+      // A server that ignores Range answers 200 with the whole file.
+      const resumed = offset > 0
+        && response.status === 206
+        && (response.headers.get("content-range") ?? "").startsWith(`bytes ${offset}-`);
+      if (response.status === 206 && !resumed) {
+        // A partial body for another offset is unusable: drop the part, retry without Range.
+        await response.body.cancel().catch(() => undefined);
+        await rm(partialPath, { force: true });
+        throw new DownloadStalledError(asset.name);
+      }
+      if (!resumed) offset = 0;
+      report(offset);
+
+      let received = offset;
+      const meter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          received += chunk.byteLength;
+          if (received > asset.size) {
+            callback(new Error(`L’asset ${asset.name} dépasse la taille annoncée.`));
+            return;
+          }
+          armIdleTimer();
+          report(received);
+          callback(null, chunk);
+        },
+      });
       await pipeline(
         Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
         meter,
-        createWriteStream(temporaryPath, { flags: "wx" }),
-        { signal },
+        createWriteStream(partialPath, { flags: resumed ? "a" : "w" }),
+        { signal: controller.signal },
       );
-      if (receivedBytes !== asset.size || hash.digest("hex") !== asset.sha256) {
-        throw new Error(`L’asset ${asset.name} est corrompu (empreinte SHA-256 inattendue).`);
+      if (received !== asset.size) {
+        throw new DownloadStalledError(asset.name);
       }
-      await retryFs(() => rename(temporaryPath, cachePath));
-      return cachePath;
     } catch (error) {
-      await rm(temporaryPath, { force: true });
+      // The server refused the Range: drop the part and start over.
+      if (error instanceof Error && error.message.includes("HTTP 416")) {
+        await rm(partialPath, { force: true });
+        throw new DownloadStalledError(asset.name);
+      }
+      // Report the stall, not the internal AbortError it caused.
+      if (controller.signal.reason instanceof DownloadStalledError && !signal?.aborted) {
+        throw controller.signal.reason;
+      }
       throw error;
+    } finally {
+      clearTimeout(idleTimer);
+      signal?.removeEventListener("abort", abortUpstream);
     }
   }
 
@@ -818,19 +808,6 @@ export class AssetSyncService {
         entry,
         relativePath: validateInstallRelativePath(joinRelativePaths(packRoot, entry.name), "file"),
       }));
-
-    if (asset.releasePackEntry) {
-      const expected = asset.releasePackEntry.toLocaleLowerCase("en-US");
-      if (
-        files.length !== 1
-        || files[0].entry.name.toLocaleLowerCase("en-US") !== expected
-      ) {
-        throw new Error(
-          "Archive d'assets auto-decouverte invalide (" + asset.name + ") : "
-          + "elle doit contenir uniquement " + asset.releasePackEntry + ".",
-        );
-      }
-    }
 
     for (const { entry, relativePath } of files) {
       const target = this.resolveTarget(root, relativePath);
@@ -890,6 +867,11 @@ export class AssetSyncService {
     await copyFile(target, backupPath, fsConstants.COPYFILE_EXCL);
   }
 
+  /**
+   * The backup is kept: callers drop it only once the state no longer lists
+   * the file, otherwise a retried pass would find no backup and delete the
+   * original it already put back.
+   */
   private async restoreOrRemove(root: string, relativePath: string): Promise<void> {
     const target = this.resolveTarget(root, relativePath);
     const current = join(this.backupDirectory, relativeToNative(relativePath));
@@ -906,7 +888,6 @@ export class AssetSyncService {
         await rm(staging, { force: true });
         throw error;
       }
-      await rm(backupPath, { force: true, maxRetries: 5, retryDelay: 100 });
     } else {
       await rm(target, { force: true, maxRetries: 5, retryDelay: 100 });
     }

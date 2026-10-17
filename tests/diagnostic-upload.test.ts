@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DiagnosticReportService } from '../electron/services/diagnostic-reports.js';
 import { uploadDiagnostic } from '../electron/services/diagnostic-upload.js';
-import { DiagnosticController } from '../electron/services/diagnostic-controller.js';
+import { DiagnosticController, diagnosticControllerInternals } from '../electron/services/diagnostic-controller.js';
+import { APP_LOCALES } from '../shared/locale.js';
+import { DIAGNOSTICS_COPY } from '../src/diagnostics-copy.js';
 
 vi.mock('../electron/services/diagnostic-system.js', () => ({ collectDiagnosticSystemInfo: async () => ({}), collectGameWindowsEvents: async () => [] }));
 const roots: string[] = [];
@@ -69,4 +71,67 @@ it('new opted-in sessions upload on exit and preserve a remote receipt', async (
   const launch = await controller.beginLaunch({ launcherVersion: '2.0.8', serverLabel: 'Test' });
   await launch.hooks.onExit(0, null);
   expect(upload).toHaveBeenCalledOnce(); expect(controller.debugState().fileName).toBe(remoteId);
+});
+it('an interrupted opted-in session is collected and uploaded on restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rotk-upload-interrupted-')); roots.push(root);
+  const directory = join(root, 'reports');
+  // The launcher or Windows stopped during the game: the session was never finalized.
+  const interrupted = await new DiagnosticReportService({ directory })
+    .beginSession({ launcherVersion: '2.0.38', serverLabel: 'Test', debugSessionEnabled: true, diagnosticUploadConsent: 1 });
+  const remoteId = randomUUID();
+  const controller: DiagnosticController = new DiagnosticController({ directory, helperPath: 'unavailable.exe', knownSecrets: () => [], onChange: () => {},
+    uploadSession: async (id) => { await controller.reports.prepareUpload(id); return remoteId; } });
+  await controller.initialize(false, true);
+  // Network recovery is not awaited by initialize.
+  await vi.waitFor(() => expect(controller.debugState().status).not.toBe('preparing'), { timeout: 10_000 });
+  expect(controller.debugState()).toMatchObject({ status: 'ready', fileName: remoteId });
+  const record = await controller.reports.getReport(interrupted.id);
+  expect(record.summary.kind).toBe('interrupted');
+  expect(record.context.debugRemoteReportId).toBe(remoteId);
+  // Without an exit boundary, shared client logs are left out on purpose.
+  expect(record.issues.some(issue => issue.reason === 'session_end_log_boundary_unavailable')).toBe(true);
+}, 20_000); // A real collection and upload preparation can exceed 5s on Windows CI.
+it('keeps why a report was not sent after exit and after the start-up retry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rotk-upload-failure-')); roots.push(root);
+  const directory = join(root, 'reports'), onDebugFailure = vi.fn(), refused = new Error('Diagnostic upload refused (413)');
+  const controller = new DiagnosticController({ directory, helperPath: 'unavailable.exe', knownSecrets: () => [], onChange: () => {}, onDebugFailure,
+    uploadSession: async () => { throw refused; } });
+  await controller.initialize(false, true);
+  const launch = await controller.beginLaunch({ launcherVersion: '2.0.38', serverLabel: 'Test' });
+  await launch.hooks.onExit(0, null);
+  expect(controller.debugState()).toMatchObject({ status: 'error', failure: { reason: 'rejected', httpStatus: 413 } });
+  expect(onDebugFailure).toHaveBeenCalledWith('debug-export-failed', 'rejected', refused);
+  const restarted = new DiagnosticController({ directory, helperPath: 'unavailable.exe', knownSecrets: () => [], onChange: () => {}, onDebugFailure,
+    uploadSession: async () => { throw new Error('Diagnostic upload timeout'); } });
+  await restarted.initialize(false, true);
+  await vi.waitFor(() => expect(restarted.debugState().status).not.toBe('preparing'));
+  expect(restarted.debugState()).toMatchObject({ status: 'error', failure: { reason: 'timeout', httpStatus: null } });
+  expect(onDebugFailure).toHaveBeenLastCalledWith('debug-upload-failed', 'timeout', expect.any(Error));
+});
+it('maps upload errors to stable reasons', () => {
+  const { debugFailure } = diagnosticControllerInternals;
+  const coded = (message: string, code: string, syscall?: string) => Object.assign(new Error(message), { code, syscall });
+  expect(debugFailure(coded("EACCES: permission denied, open 'report.json'", 'EACCES', 'open')).reason).toBe('collection');
+  expect(debugFailure(new Error('Upload evidence changed')).reason).toBe('collection');
+  expect(debugFailure(new Error('Diagnostic upload timeout')).reason).toBe('timeout');
+  expect(debugFailure(new Error('Diagnostic upload time budget exceeded')).reason).toBe('timeout');
+  for (const code of ['ENOTFOUND', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'CERT_HAS_EXPIRED']) expect(debugFailure(coded('connection failed', code)).reason).toBe('network');
+  // A firewall that blocks the launcher's socket.
+  expect(debugFailure(coded('connect EACCES 1.2.3.4:443', 'EACCES', 'connect')).reason).toBe('network');
+  expect(debugFailure(new Error('Diagnostic upload refused (413)'))).toEqual({ reason: 'rejected', httpStatus: 413 });
+  expect(debugFailure(new Error('Invalid diagnostic receipt'))).toEqual({ reason: 'rejected', httpStatus: null });
+  expect(debugFailure(new Error('Diagnostic account changed')).reason).toBe('account-changed');
+  expect(debugFailure('unexpected').reason).toBe('other');
+});
+it('every reason has a translated cause under "Report not sent"', () => {
+  const english = DIAGNOSTICS_COPY.en.debug.failure;
+  expect(Object.keys(english).sort()).toEqual(['account-changed', 'collection', 'network', 'other', 'rejected', 'timeout']);
+  for (const locale of APP_LOCALES) {
+    const failure = DIAGNOSTICS_COPY[locale].debug.failure;
+    expect(Object.keys(failure).sort()).toEqual(Object.keys(english).sort());
+    for (const [reason, text] of Object.entries(failure)) {
+      expect(text).toMatch(/\S/);
+      if (locale !== 'en') expect(text).not.toBe(english[reason as keyof typeof english]);
+    }
+  }
 });

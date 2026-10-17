@@ -4,6 +4,9 @@ import { isValidPlayerKey, normalizePlayerKey } from "../../shared/player-key.js
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_NETWORK_ATTEMPTS = 2;
 const NETWORK_RETRY_DELAY_MS = 350;
+// Failures Node reports before any connection exists: the request, and the
+// single-use attestation it carries, never reached the account service.
+const UNSENT_REQUEST_CAUSES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH"]);
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STEAM_ID_PATTERN = /^\d{17}$/;
 const DECIMAL_ID_PATTERN = /^[1-9]\d{0,18}$/;
@@ -167,18 +170,37 @@ function parseTicketResponse(
   assertLaunchTicketFresh(identity, MINIMUM_TICKET_LIFETIME_MS, timing.receivedAtMonotonicMs);
   return identity;
 }
+/** The server keeps an exact list of accepted launcher versions and names the latest. */
+export function launcherUpdateRequiredError(payload: unknown): Error {
+  const required = payload && typeof payload === "object"
+    ? (payload as Record<string, unknown>).requiredVersion
+    : null;
+  const version = typeof required === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(required) ? required : null;
+  const error = new Error(
+    "This launcher version is too old to verify the game files. Update the launcher."
+      + (version ? ` Required version: ${version}.` : ""),
+  );
+  // Tagged so the launch flow can make the update mandatory (block Play,
+  // trigger the updater) rather than only showing the message.
+  (error as { code?: string }).code = "launcher_update_required";
+  return error;
+}
+
 function serviceError(status: number, value: unknown, attestationUnavailableReason?: string): Error {
   const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
   const errorCode = payload?.error ?? null;
+  // The server also answers a missing attestation with launcher_update_required
+  // (failureCode missing_attestation). Only a real version refusal is an update.
+  const missingAttestation = payload?.failureCode === "missing_attestation";
+  if (errorCode === "launcher_update_required" && !(missingAttestation && attestationUnavailableReason)) {
+    return launcherUpdateRequiredError(payload);
+  }
   // Enforcement refuses either an installation that failed verification, or one
   // that submitted no attestation at all. When we already know the launcher
   // could not run attestation, that second case is not a tamper and not an old
   // launcher: say so, so the player checks their connection instead of chasing
   // a phantom update or a "verify files" that will not help.
-  if (
-    (errorCode === "attestation_failed" || errorCode === "launcher_update_required")
-    && attestationUnavailableReason
-  ) {
+  if ((errorCode === "attestation_failed" || errorCode === "launcher_update_required") && attestationUnavailableReason) {
     return new Error(
       `ROTK could not verify your game files: ${attestationUnavailableReason} `
       + "Check your connection and try again.",
@@ -188,15 +210,6 @@ function serviceError(status: number, value: unknown, attestationUnavailableReas
     return new Error(
       "The game files do not match the official ROTK installation. Use Verify files, then try again.",
     );
-  }
-  if (errorCode === "launcher_update_required") {
-    const error = new Error(
-      "This launcher version is too old to verify the game files. Update the launcher.",
-    );
-    // Tagged so the launch flow can make the update mandatory (block Play,
-    // trigger the updater) rather than only showing the message.
-    (error as { code?: string }).code = "launcher_update_required";
-    return error;
   }
   if (errorCode === "account_banned") {
     const expiresAt = typeof payload?.expiresAt === "string" ? payload.expiresAt : null;
@@ -215,6 +228,14 @@ function serviceError(status: number, value: unknown, attestationUnavailableReas
       "This ROTK account is not ready to play yet. Sign in on the ROTK website, then try again.",
     );
   }
+  if (errorCode === "steam_level_required") {
+    const minimum = typeof payload?.minimumLevel === "number" && Number.isInteger(payload.minimumLevel)
+      && payload.minimumLevel >= 1 && payload.minimumLevel <= 1_000_000 ? payload.minimumLevel : 1;
+    return new Error(`Steam level ${minimum} or higher is required to play ROTK with this account.`);
+  }
+  if (errorCode === "steam_level_unavailable") {
+    return new Error("Your Steam level could not be verified. Make sure your Steam profile is public, then try again shortly.");
+  }
   if (status === 401 || errorCode === "invalid_credentials") {
     return new Error("The ROTK launcher key was rejected");
   }
@@ -229,6 +250,7 @@ function serviceError(status: number, value: unknown, attestationUnavailableReas
 
 function networkFailureCause(error: unknown, aborted: boolean): string {
   if (aborted) return "timeout";
+  if (error instanceof Error && error.name === "AbortError") return "cancelled";
   const systemCode = (error as { cause?: { code?: string }; code?: string })?.cause?.code
     ?? (error as { code?: string })?.code;
   return typeof systemCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(systemCode)
@@ -280,8 +302,14 @@ export async function createLaunchTicket(
           signal: controller.signal,
         });
       } catch (error) {
-        if (attempt === MAX_NETWORK_ATTEMPTS - 1) {
-          throw new Error(`Unable to reach the ROTK account service (${networkFailureCause(error, controller.signal.aborted)})`);
+        const cause = networkFailureCause(error, controller.signal.aborted);
+        // After a timeout or a reset, the service may already have consumed the
+        // single-use attestation challenge: a replay could then be refused as
+        // modified game files instead of reported as the network error it is.
+        // With an attestation, only a request that never left is retried.
+        const replayable = cause !== "cancelled" && (!options.attestation || UNSENT_REQUEST_CAUSES.has(cause));
+        if (attempt === MAX_NETWORK_ATTEMPTS - 1 || !replayable) {
+          throw new Error(`Unable to reach the ROTK account service (${cause})`);
         }
         // Only transport failures before response headers are retried.
         clearTimeout(timeout);

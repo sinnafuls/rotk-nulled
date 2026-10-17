@@ -4,7 +4,8 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GameLauncher, type GameLaunchDiagnostics, type LaunchRequest } from '../electron/services/game-launcher.js';
+import { GameLauncher, gameLauncherInternals, type GameLaunchDiagnostics, type LaunchRequest } from '../electron/services/game-launcher.js';
+import { localizeServiceError } from '../electron/i18n.js';
 import { RUNTIME_CONFIGS } from '../electron/services/runtime-config.js';
 import { ANTICHEAT_MODULE_BYTES, ANTICHEAT_MODULE_FILE_NAME } from '../electron/services/anticheat-module.js';
 import { fileURLToPath } from 'node:url';
@@ -23,13 +24,16 @@ vi.mock('../electron/services/gameplay-patch.js', () => ({
   applyGameplayPatchMode: async () => "up-to-date",
 }));
 vi.mock('../electron/services/client-config.js', () => ({ synchronizeClientConfig: (current: string) => current,
-  synchronizeUserOptions: (current: string) => `${current}ROTKSocialLanguage=en\n`, GAME_LOCALE: { en: 'en_us', fr: 'en_us', zh: 'en_us' },
+  synchronizeUserOptions: (current: string) => `${current}ROTKSocialLanguage=en\n`, GAME_LOCALE: { en: 'en_us', fr: 'en_us', zh: 'zh_cn' },
+  synchronizeGraphicsOptions: (current: string) => `${current}OverallQuality=-1\n`,
   validateLocalCreateSessionUrl: (url: string) => url }));
 vi.mock('../electron/services/launch-ticket.js', () => ({ assertLaunchTicketFresh: () => undefined,
   createLaunchTicket: async () => ({ ticket: 'test-only-ticket', displayName: 'FixturePlayer', steamId: '76561190000000000' }) }));
 vi.mock('../electron/services/session-gateway.js', () => ({
   startLocalSessionGateway: async () => ({ createSessionUrl: 'http://127.0.0.1:45678/createsession', close: mocks.gatewayClose }),
 }));
+const runtimeCheck = vi.hoisted(() => vi.fn(async (_root: string) => undefined));
+vi.mock('../electron/services/visual-cpp-runtime.js', () => ({ assertVisualCppRuntime: runtimeCheck }));
 
 class GameChild extends EventEmitter {
   pid: number | undefined = 4242;
@@ -105,6 +109,16 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(f.request.presence.stop).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(f.request.onExit).toHaveBeenCalledOnce());
   });
+  it('refuses an outdated Visual C++ runtime before repairing voice or attesting', async () => {
+    const f = await fixture();
+    f.request.attest = vi.fn(async () => ({ status: 'not-applicable', clientPatchMode: 'clean' } as const));
+    runtimeCheck.mockRejectedValueOnce(new Error('runtime too old'));
+    await expect(f.launcher.launch(f.request)).rejects.toThrow('runtime too old');
+    expect(runtimeCheck).toHaveBeenLastCalledWith(f.request.config.installation!.root);
+    expect(mocks.deployVoice).not.toHaveBeenCalled();
+    expect(f.request.attest).not.toHaveBeenCalled();
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
   it.runIf(process.platform === 'win32')('launches when UserOptions.ini cannot be rewritten', async () => {
     const f = await fixture();
     const options = join(f.request.config.installation!.root, 'UserOptions.ini');
@@ -128,6 +142,20 @@ describe('game lifecycle remains independent of diagnostics', () => {
     await expect(f.launcher.launch(f.request)).rejects.toThrow('installed voice changed');
     expect(mocks.deployVoice).toHaveBeenCalledOnce();
     expect(mocks.checkVoice).toHaveBeenCalledOnce();
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+  it('deploys the bundled Steam shim before attestation and refuses drift before spawn', async () => {
+    const f = await fixture();
+    const shim = join(f.request.config.installation!.root, 'steam_api64.dll');
+    await writeFile(shim, 'previous release shim');
+    f.request.attest = vi.fn(async () => {
+      expect(await readFile(shim, 'utf8')).toBe('fixture bytes');
+      await writeFile(shim, 'changed after attestation');
+      return { status: 'not-applicable', clientPatchMode: 'clean' } as const;
+    });
+    await expect(f.launcher.launch(f.request)).rejects.toThrow(/shim Steam ROTK/);
+    expect(f.request.attest).toHaveBeenCalledOnce();
+    expect(await readFile(shim, 'utf8')).toBe('changed after attestation');
     expect(mocks.spawn).not.toHaveBeenCalled();
   });
   it('awaits prepared session evidence before creating the game process', async () => {
@@ -224,5 +252,104 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(() => f.child().emit('error', new Error('ENOENT'))).not.toThrow();
     expect(f.child().kill).not.toHaveBeenCalled();
     expect(mocks.gatewayClose).toHaveBeenCalled();
+  });
+});
+
+describe('a game that closes soon after a launch reported as started', () => {
+  const hint = 'Si tu ne l’as pas fermé toi-même, relance le jeu ; si ça recommence, Debug (dans les réglages) permet d’envoyer un rapport à ROTK.';
+  // Fake timers from the start, so the stability window and the measured delay
+  // advance together and no test waits three real seconds.
+  async function started() {
+    vi.useFakeTimers();
+    const f = await fixture();
+    f.request.onEarlyExit = vi.fn();
+    const launched = f.launcher.launch(f.request);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    await vi.advanceTimersByTimeAsync(3_100);
+    await expect(launched).resolves.toBe(4242);
+    return f;
+  }
+
+  it('names the delay at the exit and the code, before the exit callback, even when the early-exit hook throws', async () => {
+    const f = await started(), collection = deferred();
+    vi.mocked(f.diagnostics.onExit).mockReturnValue(collection.promise);
+    vi.mocked(f.request.onEarlyExit!).mockImplementation(() => { throw new Error('Window already closed'); });
+    await vi.advanceTimersByTimeAsync(8_900);
+    f.child().exit(-1073741819);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.request.onEarlyExit).not.toHaveBeenCalled();
+    collection.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.request.onEarlyExit).toHaveBeenCalledExactlyOnceWith(`H1Z1 s’est fermé 12 s après son lancement (code Windows 0xC0000005). ${hint}`);
+    expect(f.request.onExit).toHaveBeenCalledExactlyOnceWith(-1073741819);
+    expect(vi.mocked(f.request.onEarlyExit!).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(f.request.onExit).mock.invocationCallOrder[0]);
+  });
+
+  it('stays silent once the game has run for a minute', async () => {
+    const f = await started();
+    await vi.advanceTimersByTimeAsync(57_000);
+    f.child().exit(-1073741819);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.request.onExit).toHaveBeenCalledExactlyOnceWith(-1073741819);
+    expect(f.request.onEarlyExit).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when the game closes with exit code 0', async () => {
+    const f = await started();
+    await vi.advanceTimersByTimeAsync(8_900);
+    f.child().exit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.request.onExit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(f.request.onEarlyExit).not.toHaveBeenCalled();
+  });
+
+  it('leaves a startup failure to the rejected launch', async () => {
+    const f = await fixture();
+    f.request.onEarlyExit = vi.fn();
+    const launched = f.launcher.launch(f.request).catch(error => error);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalled());
+    f.child().exit(-1073741819);
+    expect((await launched).message).toContain('pendant son initialisation');
+    await vi.waitFor(() => expect(f.request.onExit).toHaveBeenCalledOnce());
+    expect(f.request.onEarlyExit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message bounded by the first minute and in step with its translations', () => {
+    const { earlyExitMessage } = gameLauncherInternals;
+    expect(earlyExitMessage(1, 59_999)).toBe(`H1Z1 s’est fermé 59 s après son lancement (code Windows 0x00000001). ${hint}`);
+    expect(earlyExitMessage(1, 60_000)).toBeNull();
+    expect(earlyExitMessage(0, 12_000)).toBeNull();
+    const raw = earlyExitMessage(-1073741819, 12_400)!;
+    expect(localizeServiceError(raw, 'fr')).toBe(raw);
+    expect(localizeServiceError(raw, 'en')).toMatch(/^H1Z1 closed 12 s after it started \(Windows code 0xC0000005\)\./);
+    expect(localizeServiceError(raw, 'zh')).toMatch(/^H1Z1 在启动 12 秒后关闭（Windows 代码 0xC0000005）。/);
+    const unknown = earlyExitMessage(null, 5_000)!;
+    expect(localizeServiceError(unknown, 'en')).toContain('(Windows code unknown)');
+    expect(localizeServiceError(unknown, 'zh')).toContain('（Windows 代码 未知）');
+  });
+
+  it('names an App Control block in both close messages, and only for 0xC0E90002', async () => {
+    const appControl = 'Windows a bloqué un fichier du jeu avec une stratégie App Control : '
+      + 'vérifie le Contrôle intelligent des applications dans Sécurité Windows > Contrôle des applications et du navigateur.';
+    async function startupFailure(code: number): Promise<string> {
+      const f = await fixture();
+      const launched = f.launcher.launch(f.request).catch(error => error);
+      await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalled());
+      f.child().exit(code);
+      return (await launched).message;
+    }
+    const startup = await startupFailure(0xC0E90002);
+    expect(startup).toBe(`H1Z1 s’est fermé pendant son initialisation (code Windows 0xC0E90002). ${appControl}`);
+    expect(await startupFailure(0xC0E90001)).toBe('H1Z1 s’est fermé pendant son initialisation (code Windows 0xC0E90001).');
+    const early = gameLauncherInternals.earlyExitMessage(0xC0E90002 - 2 ** 32, 2_000)!;
+    expect(early).toBe(`H1Z1 s’est fermé 2 s après son lancement (code Windows 0xC0E90002). ${appControl} ${hint}`);
+    expect(gameLauncherInternals.earlyExitMessage(0xC0E90001, 2_000)).not.toContain('App Control');
+    for (const raw of [startup, early]) {
+      expect(localizeServiceError(raw, 'en')).toContain('(Windows code 0xC0E90002). Windows blocked a game file with an App Control policy:');
+      expect(localizeServiceError(raw, 'zh')).toContain('（Windows 代码 0xC0E90002）。Windows 的应用控制策略阻止了一个游戏文件：');
+    }
+    expect(localizeServiceError(early, 'en')).toContain('App & browser control. If you did not close it yourself, start the game again;');
+    expect(localizeServiceError(early, 'zh')).toContain('“智能应用控制”。如果不是你自己关闭的，');
   });
 });

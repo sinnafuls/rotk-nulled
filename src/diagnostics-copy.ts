@@ -1,3 +1,4 @@
+import type { DebugReportFailureReason } from "../shared/contracts";
 import type { AppLocale } from "../shared/locale";
 
 export interface DiagnosticsCopy {
@@ -11,6 +12,8 @@ export interface DiagnosticsCopy {
     preparing: string;
     ready: string;
     error: string;
+    /** Second line of "error": why the report was not sent. */
+    failure: Record<DebugReportFailureReason, string>;
     settingFailed: string;
   };
 }
@@ -27,6 +30,14 @@ export const DIAGNOSTICS_COPY: Record<AppLocale, DiagnosticsCopy> = {
       preparing: "Preparing and sending your report…",
       ready: "Report received by ROTK. You can share this reference with an admin:",
       error: "Report not sent. Your evidence is kept locally. Restart the launcher to retry.",
+      failure: {
+        collection: "Cause: the report could not be prepared on this PC",
+        timeout: "Cause: sending took too long",
+        network: "Cause: the connection to the ROTK server failed",
+        rejected: "Cause: the ROTK server did not accept the report",
+        "account-changed": "Cause: the launcher key changed since this game",
+        other: "Cause: unexpected error",
+      },
       settingFailed: "This setting couldn’t be saved. Try again.",
     },
   },
@@ -41,6 +52,14 @@ export const DIAGNOSTICS_COPY: Record<AppLocale, DiagnosticsCopy> = {
       preparing: "Préparation et envoi du rapport…",
       ready: "Rapport reçu par ROTK. Tu peux communiquer cette référence à un admin :",
       error: "Rapport non envoyé. Les données restent sur ton PC. Relance le launcher pour réessayer.",
+      failure: {
+        collection: "Cause : le rapport n’a pas pu être préparé sur ton PC",
+        timeout: "Cause : l’envoi a pris trop de temps",
+        network: "Cause : la connexion au serveur ROTK a échoué",
+        rejected: "Cause : le serveur ROTK n’a pas accepté le rapport",
+        "account-changed": "Cause : la clé launcher a changé depuis cette partie",
+        other: "Cause : erreur inattendue",
+      },
       settingFailed: "Ce réglage n’a pas pu être enregistré. Réessaie.",
     },
   },
@@ -55,6 +74,14 @@ export const DIAGNOSTICS_COPY: Record<AppLocale, DiagnosticsCopy> = {
       preparing: "正在准备并发送报告…",
       ready: "ROTK 已收到报告。你可以把这个编号发给管理员：",
       error: "报告未发送，数据保留在你的电脑上。重启启动器以重试。",
+      failure: {
+        collection: "原因：无法在你的电脑上准备报告",
+        timeout: "原因：发送耗时过长",
+        network: "原因：与 ROTK 服务器的连接失败",
+        rejected: "原因：ROTK 服务器未接受该报告",
+        "account-changed": "原因：本局游戏之后启动器密钥已更改",
+        other: "原因：意外错误",
+      },
       settingFailed: "无法保存此设置，请重试。",
     },
   },

@@ -37,7 +37,9 @@ Everything else — the UI, the client build validation, the launcher-key flow, 
 - **Game file attestation** still runs against ROTK's manifest, so tampered game files still fail server-side.
 - **The game itself** (`H1Z1.exe`) is not modified.
 
-## Install
+Le jeu ne peut pas non plus être placé dans le dossier d’installation du launcher (par défaut `C:\Program Files\ROTK Launcher`) ni dans l’un de ses sous-dossiers : chaque mise à jour, réinstallation ou désinstallation du launcher supprime ce dossier entier. Le launcher refuse donc cet emplacement, pour une copie comme pour un client utilisé directement ; l’emplacement proposé par défaut est `C:\Games\ROTK`.
+
+La validation porte aussi sur le chemin physique afin qu’une jonction ou un lien symbolique ne permette pas de contourner la règle. La copie est écrite directement dans le dossier ROTK choisi : un marqueur `.rotk-install-pending.json` réserve le dossier pendant la copie, les fichiers critiques sont vérifiés en SHA-256, puis `.rotk-installation.json` est écrit en dernier. Une copie annulée ou interrompue reprend là où elle s’est arrêtée.
 
 1. Download `ROTK-Launcher-<version>-x64.exe` from the [Releases page](https://github.com/sinnafuls/rotk-nulled/releases/latest).
 2. Verify the SHA-256 against `SHA256SUMS.txt` on the same release (optional but recommended).

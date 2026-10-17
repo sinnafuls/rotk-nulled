@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { Check, Copy, FolderOpen, HardDrive, PackageCheck, ShieldCheck, X } from "lucide-react";
-import type { LauncherSnapshot } from "../../shared/contracts";
+import { useEffect, useState } from "react";
+import type { InstallDrive, LauncherSnapshot } from "../../shared/contracts";
 import { useI18n } from "../i18n";
 import { LanguagePicker } from "./WindowChrome";
 
@@ -11,6 +12,8 @@ interface InstallPanelProps {
   onClose(): void;
   onSelectSource(): void;
   onSelectDestination(): void;
+  onChooseDrive(root: string): void;
+  onInstallWithSteam(): void;
   onInstall(): void;
   onCancel(): void;
   onVerifyAssets(): void;
@@ -42,6 +45,8 @@ export function InstallPanel({
   onClose,
   onSelectSource,
   onSelectDestination,
+  onChooseDrive,
+  onInstallWithSteam,
   onInstall,
   onCancel,
   onVerifyAssets,
@@ -78,6 +83,18 @@ export function InstallPanel({
       : debugSession?.status && debugSession.status !== "idle" ? debugCopy[debugSession.status]
         : debugSession?.enabled ? debugCopy.enabled : null;
   const debugError = !debugSessionBusy && (debugSessionFailed || debugSession?.status === "error");
+  const [drives, setDrives] = useState<InstallDrive[]>([]);
+  const destinationDrive = snapshot.selection.destinationRoot?.slice(0, 3).toUpperCase() ?? null;
+
+  useEffect(() => {
+    if (!open || !requiresCopy) return;
+    let current = true;
+    window.rotk.listInstallDrives()
+      .then((value) => { if (current) setDrives(value); })
+      .catch(() => undefined);
+    return () => { current = false; };
+  }, [open, requiresCopy, snapshot.selection.destinationRoot]);
+  const debugFailure = !debugSessionBusy && !debugSessionFailed && debugSession?.status === "error" ? debugSession.failure : null;
 
   return (
     <AnimatePresence>
@@ -180,8 +197,37 @@ export function InstallPanel({
               </AnimatePresence>
             </div>
 
+            {requiresCopy && drives.length > 0 && (
+              <div className="install-drives" role="radiogroup" aria-label={copy.install.driveLabel}>
+                <span className="install-drives__label">{copy.install.driveLabel}</span>
+                {drives.map((drive) => (
+                  <button
+                    key={drive.root}
+                    type="button"
+                    role="radio"
+                    aria-checked={destinationDrive === drive.root}
+                    className={destinationDrive === drive.root ? "install-drive is-selected" : "install-drive"}
+                    disabled={installing || busy}
+                    onClick={() => onChooseDrive(drive.root)}
+                  >
+                    <HardDrive size={15} />
+                    <strong>{drive.root.slice(0, 2)}</strong>
+                    <small>{copy.install.driveFree(Math.floor(drive.freeBytes / 1024 ** 3))}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+            {!hasSource && !installing && !snapshot.installationRoot && (
+              <div className="install-steam">
+                <p className="install-panel__hint">{copy.install.noClientFound}</p>
+                <button type="button" className="text-button" onClick={onInstallWithSteam} disabled={busy}>
+                  {copy.install.installWithSteam}
+                </button>
+              </div>
+            )}
+
             {requiresCopy && (
-              <p className="install-panel__hint">{copy.install.subfolderHint}</p>
+              <p className="install-panel__hint">{installing ? copy.install.resumeHint : copy.install.subfolderHint}</p>
             )}
 
             {snapshot.error && !installing && (
@@ -229,6 +275,7 @@ export function InstallPanel({
                 <p className={`debug-session-settings__status${debugError ? " is-error" : ""}`} role={debugError ? "alert" : "status"}>
                   {debugStatus}
                   {debugSession?.status === 'ready' && debugSession.fileName && <><br /><code>{debugSession.fileName}</code></>}
+                  {debugFailure && <><br />{debugCopy.failure[debugFailure.reason]}{debugFailure.httpStatus ? ` (HTTP ${debugFailure.httpStatus})` : ""}</>}
                 </p>
               )}
             </section>

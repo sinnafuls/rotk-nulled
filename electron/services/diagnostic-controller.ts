@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { DiagnosticCaptureRequest, DiagnosticState } from "../../shared/diagnostics.js";
-import type { DebugSessionSummary } from "../../shared/contracts.js";
+import type { DebugReportFailureReason, DebugSessionSummary } from "../../shared/contracts.js";
 import type { GameLaunchDiagnostics } from "./game-launcher.js";
 import { DiagnosticObserver } from "./diagnostic-observer.js";
 import { DiagnosticReportService, type DiagnosticSessionContext } from "./diagnostic-reports.js";
@@ -40,6 +40,24 @@ async function binaryInventory(root: string | undefined): Promise<Record<string,
   return results;
 }
 
+const NETWORK_ERROR = /^(?:ENOTFOUND|EAI_AGAIN|ECONN(?:RESET|REFUSED|ABORTED)|ETIMEDOUT|ENET(?:UNREACH|DOWN)|EHOST(?:UNREACH|DOWN)|EPIPE|EPROTO|CERT_|UNABLE_TO_|SELF_SIGNED_|DEPTH_ZERO_|ERR_TLS_|ERR_SSL_)/;
+const LOCAL_ERROR = /^(?:ENOENT|EACCES|EPERM|EBUSY|ENOSPC|EMFILE|ENFILE|EEXIST|EISDIR|ENOTDIR|ENOTEMPTY|EROFS|EIO)$/;
+
+/** Stable reason for a Debug report that was not sent. The error itself goes to the launcher log. */
+function debugFailure(error: unknown): NonNullable<DebugSessionSummary["failure"]> {
+  const message = error instanceof Error ? error.message : String(error);
+  const { code = "", syscall } = (error ?? {}) as NodeJS.ErrnoException;
+  const refused = /^Diagnostic upload refused \((\d+)\)$/.exec(message);
+  let reason: DebugReportFailureReason = "other";
+  if (refused || /^(?:Invalid diagnostic receipt|Diagnostic response too large|Diagnostic upload incomplete)$/.test(message)) reason = "rejected";
+  else if (/^Diagnostic upload (?:timeout|time budget exceeded)$/.test(message)) reason = "timeout";
+  else if (message === "Diagnostic account changed") reason = "account-changed";
+  // A firewall that blocks the socket fails with connect EACCES or EPERM, not a file error.
+  else if (NETWORK_ERROR.test(code) || syscall === "connect" || syscall === "getaddrinfo") reason = "network";
+  else if (LOCAL_ERROR.test(code) || /^(?:Unsafe |Upload evidence changed|Invalid upload manifest)/.test(message)) reason = "collection";
+  return { reason, httpStatus: refused ? Number(refused[1]) || null : null };
+}
+
 export class DiagnosticController {
   readonly reports: DiagnosticReportService;
   private active: ActiveRecording | null = null;
@@ -59,6 +77,7 @@ export class DiagnosticController {
     collectClientContext?: (context: DiagnosticSessionContext) => Promise<Record<string, unknown>>;
     onDebugChange?: () => void;
     onDebugReport?: (path: string) => void;
+    onDebugFailure?: (code: string, reason: DebugReportFailureReason, error: unknown) => void;
     uploadSession?: (id: string, context: DiagnosticSessionContext) => Promise<string>;
   }) {
     this.reports = new DiagnosticReportService({ directory: options.directory, knownSecrets: options.knownSecrets, onChange: () => this.changed() });
@@ -77,9 +96,7 @@ export class DiagnosticController {
         }
         this.debug.status = 'preparing';
         // Network recovery must not block opening the launcher window.
-        void this.exportDebugSession(candidate.id).catch(() => {
-          this.debug.status = 'error'; this.debug.error = 'debug-upload-failed'; this.changed();
-        });
+        void this.exportDebugSession(candidate.id).catch((error: unknown) => this.debugFailed('debug-upload-failed', error));
         break;
       }
       return;
@@ -92,7 +109,7 @@ export class DiagnosticController {
       if (record.context.debugSessionEnabled === true && !record.context.debugExportedFile) {
         this.debug.status = "preparing";
         try { await this.exportDebugSession(latest.id); }
-        catch { this.debug.status = "error"; this.debug.error = "debug-export-failed"; }
+        catch (error) { this.debugFailed("debug-export-failed", error); }
       }
     }
   }
@@ -114,6 +131,13 @@ export class DiagnosticController {
       this.options.onDebugChange?.();
     }, 100);
   }
+  /** "Report not sent" keeps why, for the player and for the launcher log. */
+  private debugFailed(code: string, error: unknown): void {
+    const failure = debugFailure(error);
+    this.debug = { ...this.debug, status: "error", error: code, failure };
+    try { this.options.onDebugFailure?.(code, failure.reason, error); } catch { /* The reason is still shown. */ }
+    this.changed();
+  }
   setEnabled(enabled: boolean): void {
     if (this.active) throw new Error("Cannot change native diagnostics during a game session");
     this.enabled = enabled; this.changed();
@@ -124,7 +148,7 @@ export class DiagnosticController {
     const debug = this.debug.enabled;
     const created = await this.reports.beginSession({ ...context, debugSessionEnabled: debug,
       diagnosticUploadConsent: debug && this.options.uploadSession ? 1 : 0 }).catch((error) => {
-      if (debug) { this.debug.status = "error"; this.debug.error = "debug-start-failed"; this.changed(); }
+      if (debug) this.debugFailed("debug-start-failed", error);
       throw error;
     });
     const record = await this.reports.getReport(created.id);
@@ -138,7 +162,7 @@ export class DiagnosticController {
       await this.reports.updateSession(active.id, { captureStatus: captureEnabled ? "pending" : "disabled" });
     } catch (error) {
       if (this.active === active) this.active = null;
-      if (debug) { this.debug.status = "error"; this.debug.error = "debug-start-failed"; }
+      if (debug) this.debugFailed("debug-start-failed", error);
       this.changed();
       throw error;
     }
@@ -242,9 +266,9 @@ export class DiagnosticController {
         if (this.active === active) this.active = null;
         this.changed();
       }
-    })().catch(() => {
+    })().catch((error: unknown) => {
       this.error = "Diagnostic collection was incomplete. Existing evidence is still available.";
-      if (active.debug) { this.debug.status = "error"; this.debug.error = "debug-export-failed"; }
+      if (active.debug) this.debugFailed("debug-export-failed", error);
       this.changed();
     });
     return active.finalizing;
@@ -255,9 +279,12 @@ export class DiagnosticController {
       const report = await this.reports.getReport(id);
       if (report.context.diagnosticUploadConsent !== 1) throw new Error('Upload consent is missing');
       this.debug.status = 'preparing'; this.changed();
+      // A session cut short by a launcher or Windows stop was never collected,
+      // and only collected evidence can be prepared for upload.
+      if (!report.collectionCompletedAt) await this.reports.collectSession(id);
       const remoteId = await this.options.uploadSession(id, report.context);
       await this.reports.updateSession(id, { debugRemoteReportId: remoteId, debugUploadedAt: new Date().toISOString() });
-      this.debug = { ...this.debug, status: 'ready', fileName: remoteId, error: null }; this.changed(); return;
+      this.debug = { ...this.debug, status: 'ready', fileName: remoteId, error: null, failure: null }; this.changed(); return;
     }
     if (!this.options.exportDirectory) throw new Error("Debug export directory is unavailable");
     await mkdir(this.options.exportDirectory, { recursive: true });
@@ -267,7 +294,7 @@ export class DiagnosticController {
     await this.reports.exportReport(id, path, { includeDumps: true,
       description: "Session enregistrée avec Debug activé avant le lancement. Comparer la chronologie des performances et les journaux du client ; une coïncidence ne prouve pas la cause du stutter." });
     await this.reports.updateSession(id, { debugExportedFile: fileName, debugExportedAt: new Date().toISOString() });
-    this.debug = { ...this.debug, status: "ready", fileName, error: null };
+    this.debug = { ...this.debug, status: "ready", fileName, error: null, failure: null };
     try { this.options.onDebugReport?.(path); } catch { /* The completed ZIP remains available. */ }
     this.changed();
   }
@@ -373,4 +400,4 @@ export class DiagnosticController {
   }
 }
 
-export const diagnosticControllerInternals = { binaryInventory };
+export const diagnosticControllerInternals = { binaryInventory, debugFailure };

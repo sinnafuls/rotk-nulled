@@ -41,7 +41,7 @@ static rotk_volume_destroy_fn g_volume_destroy;
 #define REQUEST_SESSION_SET_3D_POSITION 0x1cU
 #define POSITION_REQUEST_BYTES 0x130U
 #define POSITION_DISPOSITION_OFFSET 0x12cU
-#define POSITION_NO_REPLY_REQUIRED 1U
+#define POSITION_REPLY_REQUIRED 0U
 #define LOGIN_REQUEST_BYTES 0x90U
 #define SESSION_REQUEST_BYTES 0x90U
 #define SESSIONGROUP_REQUEST_BYTES 0x80U
@@ -898,8 +898,8 @@ static BOOL parse_grant(const uint8_t *wire,
 }
 
 static BOOL fetch_grant_result(voice_action action, const WCHAR *channel, voice_grant *grant,
-                               DWORD budget, DWORD *http_status, DWORD *retry_after) {
-    static const WCHAR user_agent[] = L"ROTK-VivoxProxy/1";
+                               DWORD budget, DWORD *http_status, DWORD *retry_after, BOOL *transport_failure) {
+    static const WCHAR user_agent[] = L"ROTK-VivoxProxy/2.0.37";
     static const WCHAR login_path[] = L"/voice/v1/login";
     static const WCHAR join_path[] = L"/voice/v1/join";
     static const WCHAR content_type_expected[] =
@@ -913,12 +913,16 @@ static BOOL fetch_grant_result(voice_action action, const WCHAR *channel, voice_
     DWORD status = 0U;
     DWORD status_bytes = sizeof(status);
     DWORD content_type_bytes = sizeof(content_type);
+    DWORD content_length = 0U, content_length_bytes = sizeof(content_length);
+    BOOL has_content_length = FALSE;
     DWORD disabled_features = WINHTTP_DISABLE_REDIRECTS;
     DWORD read_bytes;
     size_t wire_bytes = 0U;
     ULONGLONG began = GetTickCount64();
     ULONGLONG deadline = began + budget;
     BOOL result = FALSE;
+    BOOL interrupted = FALSE;
+    DWORD transport_error = 0U;
     int written;
 
     SecureZeroMemory(grant, sizeof(*grant));
@@ -1005,31 +1009,42 @@ static BOOL fetch_grant_result(voice_action action, const WCHAR *channel, voice_
         goto cleanup;
     }
 
+    has_content_length = WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &content_length, &content_length_bytes, WINHTTP_NO_HEADER_INDEX);
+    if (has_content_length && content_length > GRANT_WIRE_MAX) goto cleanup;
     for (;;) {
-        if (wire_bytes == sizeof(wire) ||
-            !set_remaining_timeouts(request, deadline) ||
+        if (wire_bytes == sizeof(wire)) goto cleanup;
+        if (!set_remaining_timeouts(request, deadline) ||
             !WinHttpReadData(
                 request,
                 wire + wire_bytes,
                 (DWORD)(sizeof(wire) - wire_bytes),
                 &read_bytes)) {
+            interrupted = TRUE;
             goto cleanup;
         }
         if (read_bytes == 0U) {
+            if (has_content_length && wire_bytes != content_length) {
+                interrupted = TRUE; SetLastError(ERROR_WINHTTP_CONNECTION_ERROR); goto cleanup;
+            }
             break;
         }
         wire_bytes += read_bytes;
-        if (wire_bytes > GRANT_WIRE_MAX ||
-            remaining_timeout(deadline) == 0U) {
+        if (wire_bytes > GRANT_WIRE_MAX) goto cleanup;
+        if (remaining_timeout(deadline) == 0U) {
+            interrupted = TRUE;
             goto cleanup;
         }
     }
     if (remaining_timeout(deadline) != 0U) {
         result = parse_grant(wire, wire_bytes, action, grant);
-    }
+    } else interrupted = TRUE;
 
 cleanup:
+    // Querying Retry-After can overwrite the original WinHTTP failure code.
+    if (!result && (status == 0U || interrupted)) transport_error = GetLastError();
     if (http_status != NULL) *http_status = status;
+    if (transport_failure != NULL) *transport_failure = interrupted;
     if (retry_after != NULL) {
         WCHAR retry[32] = {0}; DWORD bytes = sizeof(retry);
         *retry_after = 0U;
@@ -1037,18 +1052,17 @@ cleanup:
                 WINHTTP_HEADER_NAME_BY_INDEX, retry, &bytes, WINHTTP_NO_HEADER_INDEX)) {
             DWORD seconds = 0U; size_t i = 0U;
             for (; retry[i] >= L'0' && retry[i] <= L'9'; ++i)
-                seconds = seconds > 20U ? 21U : seconds * 10U + (DWORD)(retry[i] - L'0');
-            if (i != 0U && retry[i] == L'\0') *retry_after = seconds > 20U ? 20001U : seconds * 1000U;
+                seconds = seconds > MAXDWORD / 1000U ? MAXDWORD / 1000U + 1U : seconds * 10U + (DWORD)(retry[i] - L'0');
+            if (i != 0U && retry[i] == L'\0') *retry_after = seconds > MAXDWORD / 1000U ? MAXDWORD : seconds * 1000U;
         }
     }
     if (InterlockedIncrement(&g_grant_trace_count) <= 16L) {
         char line[192];
-        DWORD error = !result && status == 0U ? GetLastError() : 0U;
         (void)snprintf(line, sizeof(line),
             "[rotk-vivoxproxy] grant: action=%u http=%lu elapsed_ms=%llu valid=%u winhttp_error=%lu",
             (unsigned)action, (unsigned long)status,
             (unsigned long long)(GetTickCount64() - began), (unsigned)result,
-            (unsigned long)error);
+            (unsigned long)transport_error);
         proxy_trace_line(line);
     }
     if (request != NULL) {
@@ -1070,7 +1084,7 @@ cleanup:
 }
 
 static BOOL fetch_grant(voice_action action, const WCHAR *channel, voice_grant *grant) {
-    return fetch_grant_result(action, channel, grant, VOICE_TIMEOUT_MS, NULL, NULL);
+    return fetch_grant_result(action, channel, grant, VOICE_TIMEOUT_MS, NULL, NULL, NULL);
 }
 
 static BOOL protection_is_writable(DWORD protection) {
@@ -2856,8 +2870,9 @@ int __cdecl vx_issue_request3(void *request, int *request_count) {
 #if defined(ROTK_VIVOX_V5_COMPAT)
     if (request_type == REQUEST_SESSION_SET_3D_POSITION &&
         request_is_accessible(request, POSITION_REQUEST_BYTES, TRUE)) {
-        /* Vivox's no-reply disposition skips success replies but retains errors. */
-        uint32_t disposition = POSITION_NO_REPLY_REQUIRED;
+        /* BR1315 retires every pending cookie on a response, before ignoring
+         * position successes. Suppressing them can prevent native logout. */
+        uint32_t disposition = POSITION_REPLY_REQUIRED;
         memcpy((uint8_t *)request + POSITION_DISPOSITION_OFFSET,
                &disposition, sizeof(disposition));
     }
