@@ -18,6 +18,9 @@ export interface RuntimeConfig {
   launchTicketUrl: string;
   /** Phase A of integrity attestation: issues the signed single-use challenge. */
   attestationChallengeUrl: string;
+  /** Level-2 TPM anchor (#320 §A): enrolment of the identity key under the endorsement key. */
+  tpmEnrolBeginUrl: string;
+  tpmEnrolCompleteUrl: string;
 }
 
 /**
@@ -47,6 +50,8 @@ export const RUNTIME_CONFIGS: Readonly<Record<ServerId, RuntimeConfig>> = Object
     websiteOrigin: "https://rotk.app",
     launchTicketUrl: "https://rotk.app/api/launcher/ticket",
     attestationChallengeUrl: "https://rotk.app/api/launcher/attestation/challenge",
+    tpmEnrolBeginUrl: "https://rotk.app/api/launcher/tpm/enroll-begin",
+    tpmEnrolCompleteUrl: "https://rotk.app/api/launcher/tpm/enroll-complete",
   }),
   test: Object.freeze({
     id: "test",
@@ -63,6 +68,8 @@ export const RUNTIME_CONFIGS: Readonly<Record<ServerId, RuntimeConfig>> = Object
     websiteOrigin: "https://test.rotk.app",
     launchTicketUrl: "https://test.rotk.app/api/launcher/ticket",
     attestationChallengeUrl: "https://test.rotk.app/api/launcher/attestation/challenge",
+    tpmEnrolBeginUrl: "https://test.rotk.app/api/launcher/tpm/enroll-begin",
+    tpmEnrolCompleteUrl: "https://test.rotk.app/api/launcher/tpm/enroll-complete",
   }),
 } satisfies Record<ServerId, RuntimeConfig>);
 

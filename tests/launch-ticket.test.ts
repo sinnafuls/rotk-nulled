@@ -69,12 +69,22 @@ describe("ROTK launch ticket client", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
-  it("sends the launcher version and no hardware fingerprint", async () => {
+  it("sends the launcher version and HWID vector when provided", async () => {
+    const hwid = { machine_guid: "mg-1", smbios_uuid: "sm-2", disk_serial: "dk-4" };
+    const fetchImpl = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({ launcherKey, launcherVersion: "1.4.0", hwid });
+      return jsonResponse(validResponse);
+    }) as typeof fetch;
+    await createLaunchTicket(launcherKey, endpoint, { fetchImpl, launcherVersion: "1.4.0", hwid });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("omits an empty HWID vector rather than sending an empty object", async () => {
     const fetchImpl = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
       expect(JSON.parse(String(init?.body))).toEqual({ launcherKey, launcherVersion: "1.4.0" });
       return jsonResponse(validResponse);
     }) as typeof fetch;
-    await createLaunchTicket(launcherKey, endpoint, { fetchImpl, launcherVersion: "1.4.0" });
+    await createLaunchTicket(launcherKey, endpoint, { fetchImpl, launcherVersion: "1.4.0", hwid: {} });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 

@@ -244,17 +244,34 @@ describe('game lifecycle remains independent of diagnostics', () => {
     await launched;
   });
 
-  it('sends the attestation block and version with no hardware fingerprint or TPM evidence', async () => {
+  it('sends the attestation block, version and the fingerprint the outcome answered', async () => {
     const f = await fixture();
     const block = { challengeId: 'c'.repeat(32), evidence: 'e'.repeat(64) };
+    const hwid = { machine_guid: 'mg-1', volume_serial: 'vs-2' };
     f.request.launcherVersion = '2.0.41';
-    f.request.attest = async () => ({ status: 'attested', block, clientPatchMode: 'clean' });
+    f.request.attest = async () => ({ status: 'attested', block, hwid, clientPatchMode: 'clean' });
     const launched = f.launcher.launch(f.request).catch(error => error);
     await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
     expect(mocks.createTicket).toHaveBeenCalledOnce();
-    const options = mocks.createTicket.mock.calls[0][2];
-    expect(options).toEqual({ launcherVersion: '2.0.41', attestation: block });
-    expect(JSON.stringify(options)).not.toMatch(/hwid|tpm/i);
+    expect(mocks.createTicket.mock.calls[0][2]).toEqual({ launcherVersion: '2.0.41', attestation: block, hwid });
+    f.child().exit(0);
+    await launched;
+  });
+
+  it('falls back to the pre-launch fingerprint only when the launch could not attest', async () => {
+    const f = await fixture();
+    const fallback = vi.fn(async () => ({ disk_serial: 'dk-9' }));
+    f.request.launcherVersion = '2.0.41';
+    f.request.fallbackHwid = fallback;
+    f.request.attest = async () => ({ status: 'unavailable', reason: 'the integrity service could not be reached.', clientPatchMode: 'clean' });
+    const launched = f.launcher.launch(f.request).catch(error => error);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    expect(mocks.createTicket).toHaveBeenCalledOnce();
+    expect(mocks.createTicket.mock.calls[0][2]).toEqual({
+      launcherVersion: '2.0.41',
+      attestationUnavailableReason: 'the integrity service could not be reached.',
+      hwid: { disk_serial: 'dk-9' },
+    });
     f.child().exit(0);
     await launched;
   });

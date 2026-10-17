@@ -1,7 +1,10 @@
 import { generateKeyPairSync, sign as signPayload } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  ATTESTATION_TEST_VECTORS,
+  TPM_BINDING_DOMAIN,
   challengeSigningInput,
+  tpmBindingMessage,
   verifyAttestationSignature,
 } from "../shared/attestation";
 import { requestAttestationChallenge } from "../electron/services/integrity-attestation";
@@ -118,5 +121,27 @@ describe("challenge parsing with fingerprint slots", () => {
         trustedKeys: { "test-key": publicKeyRaw },
       })).rejects.toThrow(/Invalid attestation challenge/);
     }
+  });
+});
+
+describe("TPM binding message (#320 §C)", () => {
+  it("matches the frozen cross-implementation vector", () => {
+    const vector = ATTESTATION_TEST_VECTORS.tpmBinding;
+    expect(tpmBindingMessage(vector.challengeId, vector.hwid)).toBe(vector.expectedMessage);
+  });
+
+  it("covers the challengeId and every string slot as sent, keys sorted, nothing normalised", () => {
+    const message = tpmBindingMessage(CHALLENGE_ID, { b: " Two ", a: "one", n: 1, o: null });
+    expect(message).toBe(`${TPM_BINDING_DOMAIN}\0${CHALLENGE_ID}\0a=one\0b= Two `);
+    expect(tpmBindingMessage(CHALLENGE_ID, {})).toBe(`${TPM_BINDING_DOMAIN}\0${CHALLENGE_ID}`);
+    expect(tpmBindingMessage(CHALLENGE_ID, undefined)).toBe(`${TPM_BINDING_DOMAIN}\0${CHALLENGE_ID}`);
+    expect(tpmBindingMessage(CHALLENGE_ID, ["not", "an", "object"])).toBe(`${TPM_BINDING_DOMAIN}\0${CHALLENGE_ID}`);
+  });
+
+  it("changes when a slot value, a slot name or the challenge changes", () => {
+    const reference = tpmBindingMessage(CHALLENGE_ID, { machine_guid: "a", volume_serial: "b" });
+    expect(tpmBindingMessage(CHALLENGE_ID, { machine_guid: "a", volume_serial: "c" })).not.toBe(reference);
+    expect(tpmBindingMessage(CHALLENGE_ID, { machine_guid: "a", disk_serial: "b" })).not.toBe(reference);
+    expect(tpmBindingMessage("b".repeat(32), { machine_guid: "a", volume_serial: "b" })).not.toBe(reference);
   });
 });

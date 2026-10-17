@@ -50,8 +50,13 @@ interface TicketRequestOptions {
    * under-minimum version with launcher_update_required.
    */
   launcherVersion?: string;
-  // No hardware fingerprint field: this launcher sends none, and the server
-  // decides whether a ticket request without one is admitted.
+  /**
+   * The raw hardware fingerprint (see machine-identity.ts). The server
+   * keyed-hashes each component and stores only digests; the launcher holds no
+   * hashing key and sends the raw values, exactly like the address it never
+   * sees hashed.
+   */
+  hwid?: Record<string, string>;
 }
 
 function validateEndpoint(value: string): URL {
@@ -272,6 +277,7 @@ export async function createLaunchTicket(
     launcherKey: normalizePlayerKey(playerKey),
     ...(options.launcherVersion ? { launcherVersion: options.launcherVersion } : {}),
     ...(options.attestation ? { attestation: options.attestation } : {}),
+    ...(options.hwid && Object.keys(options.hwid).length > 0 ? { hwid: options.hwid } : {}),
   });
 
   for (let attempt = 0; attempt < MAX_NETWORK_ATTEMPTS; attempt += 1) {

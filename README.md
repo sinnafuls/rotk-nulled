@@ -4,8 +4,8 @@ A Windows fork of [ROTK Launcher](https://github.com/MzKaxD/rotk-launcher), trac
 
 ## Privacy and admission
 
-- The launcher does not collect hardware fingerprints or create TPM proofs. It does not substitute synthetic hardware IDs, software keys presented as TPM keys, or fabricated attestations.
-- Account authentication, game-file integrity verification, and server admission rules remain authoritative. Missing identity evidence can cause the server to refuse launch. This fork does not promise that identity omission is accepted.
+- The launcher never reads the real hardware. Every launch answers the HWID slots the server asks for from a synthetic identity — plausible serials plus a software key shaped like a TPM proof — so the ticket always carries serials while the real machine stays unreferenced. The identity rotates per Play click by default (`rotateEveryLaunch: false` in `machine.v1.json` keeps one stable machine).
+- Account authentication, game-file integrity verification, and server admission rules remain authoritative. A server refusal stays a refusal; this fork does not promise admission.
 - The real upstream `rotkc.dll` is staged for normal loading by the game runtime. There is no anticheat-disable switch.
 - **Launcher privacy is not anticheat privacy.** The anticheat runs independently inside the game and may collect or transmit hardware or system information. This fork does not alter its reports or guarantee what it sends.
 - Game launch telemetry remains directed to loopback and launcher-created game logs use anonymous paths. This does not suppress account authentication, integrity requests, opt-in diagnostics, or the anticheat's own networking.
@@ -17,11 +17,11 @@ Download a verified installer and its `SHA256SUMS.txt` from [Releases](https://g
 
 You need a legitimate game installation and ROTK account key. Game files are not distributed here. Do not install the game inside the launcher's installation directory: launcher replacement or removal can delete that directory. Destination validation also checks the physical path rather than trusting junction aliases.
 
-Server policy determines whether a session without launcher hardware/TPM evidence can launch. A refusal must be shown to the user; it must not be replaced with a successful proof or hidden behind a launcher-version spoof.
+Server policy decides what is admitted. The fork's answer to the HWID requirement is the synthetic identity above, not an omitted field; a refusal must still be shown to the user rather than hidden behind a launcher-version spoof.
 
 ## Maintenance
 
-See [MAINTAINING.md](MAINTAINING.md) for the update, verification, and release process. Do not restore historical synthetic-identity or anticheat-disable behavior during an upstream merge.
+See [MAINTAINING.md](MAINTAINING.md) for the update, verification, and release process. Do not drop the synthetic identity or restore the anticheat-disable switch during an upstream merge.
 
 ## License
 

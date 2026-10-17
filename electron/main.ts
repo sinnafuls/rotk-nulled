@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
+import { rotateIdentity } from "./services/synthetic-identity.js";
 import { runNetworkCheck } from "./services/network-check.js";
 import type { NetworkCheckReport } from "../shared/contracts.js";
 import { mkdir, realpath, stat, statfs } from "node:fs/promises";
@@ -63,6 +64,10 @@ import {
   type AttestationOutcome,
 } from "./services/game-launcher.js";
 import type { InputProfileRecovery } from "./services/input-profile-recovery.js";
+import { HWID_CORE_SLOTS, collectHwid } from "./services/machine-identity.js";
+import { collectTpmProof } from "./services/tpm-identity.js";
+import { collectTpmAnchor, enrolTpmAnchor } from "./services/tpm-anchor.js";
+import { tpmBindingMessage } from "../shared/attestation.js";
 import { PathPolicyError, assertOutsideLauncherFolder, classifyClientSource, validateInstallDestination } from "./services/path-policy.js";
 import { H1Z1_STEAM_APP_ID, locateSteamClient } from "./services/steam-locator.js";
 import {
@@ -559,9 +564,10 @@ async function attestInstallation(
         : []),
     ]);
 
-    // No hardware fingerprint is read for the challenge's slots and no TPM
-    // proof or anchor is created: this launcher sends none of that evidence,
-    // and the server decides whether an attestation without it is admitted.
+    // The fingerprint only needs the slots the challenge names: read it while
+    // the files are hashed instead of after.
+    const hwidSlots = challenge.hwidSlots ?? HWID_CORE_SLOTS;
+    const hwidPromise = collectHwid(hwidSlots).catch(() => ({}));
     const measurement = await measureInstallation({
       installationRoot: root,
       userDataDirectory,
@@ -592,13 +598,47 @@ async function attestInstallation(
         && fresh.policyVersion === challenge.policyVersion
         && fresh.packVersion === challenge.packVersion
         && (fresh.clientPatchMode ?? "clean") === clientPatchMode
+        && JSON.stringify(fresh.hwidSlots ?? HWID_CORE_SLOTS) === JSON.stringify(hwidSlots)
       ) {
         challenge = fresh;
       }
     }
+    // The fingerprint this launch was asked for (#320 §B): the slots the signed
+    // challenge names, or the core five for a server that names none. Both the
+    // vector and the signing key come from the synthetic identity, rotated per
+    // Play click.
+    const hwid = await hwidPromise;
+    // Sign with the TPM-backed key when the machine has one; null when it does
+    // not, and the launch proceeds without it. The message binds the
+    // (single-use) challengeId to the fingerprint exactly as the ticket will
+    // carry it (#320 §C): neither can be swapped under the other, and the
+    // single-use challenge stops replay. The server decides (behind its own
+    // flag) whether a missing proof is acceptable.
+    const bindingMessage = tpmBindingMessage(challenge.challengeId, hwid);
+    // Both TPM steps sign the same message; run them side by side.
+    const [tpmProof, anchor] = await Promise.all([
+      collectTpmProof(bindingMessage).catch(() => null),
+      collectTpmAnchor(bindingMessage).catch(() => null),
+    ]);
+    // Level-2 anchor (#320 §A): the TPM identity key signs the same message,
+    // and the server is told which endorsement key it lives under — a
+    // credential activation the first time, one confirming request after.
+    // Observe only: a machine without it launches exactly as before.
+    if (anchor !== null) {
+      const enrolment = await enrolTpmAnchor(
+        { beginUrl: runtime.tpmEnrolBeginUrl, completeUrl: runtime.tpmEnrolCompleteUrl },
+        playerKey,
+        launcherVersion,
+        anchor,
+      ).catch(() => null);
+      if (enrolment !== null && enrolment.state !== "activated") {
+        console.warn("TPM anchor not activated", enrolment);
+      }
+    }
     return {
       status: "attested",
-      block: buildAttestationResult(challenge, measurement, launcherVersion),
+      block: buildAttestationResult(challenge, measurement, launcherVersion, tpmProof, anchor?.proof ?? null),
+      hwid,
       clientPatchMode,
     };
   } catch (error) {
@@ -1226,6 +1266,10 @@ function registerIpc(): void {
       const launchCredential = identityFromPlayerKey(selectedKey);
       const launchRuntime = activeRuntime();
       phase = "launching";
+      // One synthetic machine identity per Play click: the HWID vector and the
+      // signing key are both replaced before attestation runs, so nothing from
+      // a previous launch survives to be correlated.
+      rotateIdentity();
       lastErrorRaw = null;
       inputProfileRecovery = null;
       await broadcastSnapshot();
@@ -1260,6 +1304,9 @@ function registerIpc(): void {
           presence: discordPresence,
           // Shown by the snapshot that onExit broadcasts right after.
           onEarlyExit: (message) => { lastErrorRaw = message; },
+          // Best-effort hardware fingerprint for a launch that could not
+          // attest; a failure degrades to no HWID signal, never a blocked launch.
+          fallbackHwid: () => collectHwid(),
           onInputProfileRecovered: (recovery) => {
             inputProfileRecovery = recovery;
             void broadcastSnapshot();

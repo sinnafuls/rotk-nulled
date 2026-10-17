@@ -59,6 +59,13 @@ export type AttestationOutcome =
   | {
       readonly status: "attested";
       readonly block: unknown;
+      /**
+       * The fingerprint answered for the slots the challenge asked (#320 §B).
+       * It is what the TPM proof inside the block was signed over, so the
+       * ticket request must carry exactly this object and not a vector read at
+       * another time.
+       */
+      readonly hwid?: Record<string, string>;
       /** Server-directed shotgun sprint client-patch mode for this launch. */
       readonly clientPatchMode: GameplayPatchMode;
     }
@@ -96,6 +103,12 @@ export interface LaunchRequest {
   attest?: () => Promise<AttestationOutcome>;
   /** This launcher's version, sent so the server's update gate can act. */
   launcherVersion?: string;
+  /**
+   * Raw hardware fingerprint for a launch that could not attest (an attested
+   * launch already carries one). Only called when needed; never throws into
+   * the launch path.
+   */
+  fallbackHwid?: () => Promise<Record<string, string>>;
   /** Best-effort telemetry only. Diagnostic failures never control the game lifecycle. */
   diagnostics?: GameLaunchDiagnostics;
   /** Optional local presence; failures never control the game lifecycle. */
@@ -125,19 +138,26 @@ function diagnosticCallback(callback: (() => void) | undefined): void {
 }
 
 /**
- * Turn an attestation outcome plus the launcher's version into the ticket
- * request options. A clean measurement carries its block; a not-applicable one
- * carries nothing; an unavailable one records why so an enforced refusal can
- * name the real cause. The version rides along regardless so the update gate
- * works even with no attestation. No hardware fingerprint is sent: the server
- * decides whether a launch without one is admitted.
+ * Turn an attestation outcome plus the launcher's version and fingerprint into
+ * the ticket request options. A clean measurement carries its block; a
+ * not-applicable one carries nothing; an unavailable one records why so an
+ * enforced refusal can name the real cause. The version and HWID ride along
+ * regardless, so the update gate and HWID capture work even with no
+ * attestation.
  */
 async function ticketRequestOptions(
   request: LaunchRequest,
   outcome: AttestationOutcome,
-): Promise<{ attestation?: unknown; attestationUnavailableReason?: string; launcherVersion?: string }> {
-  const base: { launcherVersion?: string } = {};
+): Promise<{ attestation?: unknown; attestationUnavailableReason?: string; launcherVersion?: string; hwid?: Record<string, string> }> {
+  const base: { launcherVersion?: string; hwid?: Record<string, string> } = {};
   if (request.launcherVersion) base.launcherVersion = request.launcherVersion;
+  // An attested launch answers the slots its challenge named, and its TPM proof
+  // is bound to that exact vector; the fingerprint read before the launch is
+  // the fallback for a launch that could not attest.
+  const hwid = outcome.status === "attested" && outcome.hwid !== undefined
+    ? outcome.hwid
+    : await request.fallbackHwid?.().catch(() => ({}));
+  if (hwid && Object.keys(hwid).length > 0) base.hwid = hwid;
   if (outcome.status === "attested") return { ...base, attestation: outcome.block };
   if (outcome.status === "unavailable") {
     return { ...base, attestationUnavailableReason: outcome.reason };
