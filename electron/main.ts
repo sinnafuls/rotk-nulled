@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import { rotateIdentity } from "./services/synthetic-identity.js";
 import { runNetworkCheck } from "./services/network-check.js";
 import type { NetworkCheckReport } from "../shared/contracts.js";
 import { mkdir, realpath, stat, statfs } from "node:fs/promises";
@@ -52,7 +51,7 @@ import {
   resolveBundledVivoxProxyPath,
   resolveBundledVivoxRuntimePath,
   resolveBundledGameplayPatchPath,
-  resolveBundledAnticheatModulePath,
+  resolveBundledRotkcPath,
   resolveBundledDiagnosticsPath,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
@@ -64,10 +63,6 @@ import {
   type AttestationOutcome,
 } from "./services/game-launcher.js";
 import type { InputProfileRecovery } from "./services/input-profile-recovery.js";
-import { HWID_CORE_SLOTS, collectHwid } from "./services/machine-identity.js";
-import { collectTpmProof } from "./services/tpm-identity.js";
-import { collectTpmAnchor, enrolTpmAnchor } from "./services/tpm-anchor.js";
-import { tpmBindingMessage } from "../shared/attestation.js";
 import { PathPolicyError, assertOutsideLauncherFolder, classifyClientSource, validateInstallDestination } from "./services/path-policy.js";
 import { H1Z1_STEAM_APP_ID, locateSteamClient } from "./services/steam-locator.js";
 import {
@@ -210,8 +205,6 @@ let serverStatus: Partial<Record<ServerId, ServerStatus>> = {};
 let quitWhenGameExits = false;
 let crashReportRequests = 0;
 let assetSyncEnabled = true;
-// LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll for the game.
-let anticheatEnabled = false;
 let assetSyncRunning = false;
 let assetSyncStatus: AssetSyncStatus = "idle";
 let assetSyncWarning: AssetSyncWarning | null = null;
@@ -303,9 +296,7 @@ async function findQuarantinedPatches(): Promise<string[]> {
     resolveBundledVivoxProxyPath(),
     resolveBundledVivoxRuntimePath(),
     resolveBundledGameplayPatchPath(),
-    // LOCAL EDIT (fork): the anticheat module is only required when the
-    // testing toggle is on.
-    ...(anticheatEnabled ? [resolveBundledAnticheatModulePath()] : []),
+    resolveBundledRotkcPath(),
   ];
   const missing: string[] = [];
   for (const path of bundled) {
@@ -568,10 +559,9 @@ async function attestInstallation(
         : []),
     ]);
 
-    // The fingerprint only needs the slots the challenge names: read it while
-    // the files are hashed instead of after.
-    const hwidSlots = challenge.hwidSlots ?? HWID_CORE_SLOTS;
-    const hwidPromise = collectHwid(hwidSlots).catch(() => ({}));
+    // No hardware fingerprint is read for the challenge's slots and no TPM
+    // proof or anchor is created: this launcher sends none of that evidence,
+    // and the server decides whether an attestation without it is admitted.
     const measurement = await measureInstallation({
       installationRoot: root,
       userDataDirectory,
@@ -592,7 +582,7 @@ async function attestInstallation(
     }
     // A first launch hashes the whole client and can outlive the challenge.
     // The measurement does not depend on it, so a fresh one with the same
-    // build, policy, pack, patch mode and slots can be used as is. A failed
+    // build, policy, pack and patch mode can be used as is. A failed
     // renewal keeps the old one, which the server may still accept.
     if (Date.parse(challenge.expiresAt) - Date.now() < CHALLENGE_MARGIN_MS) {
       const fresh = await requestAttestationChallenge(playerKey, runtime.attestationChallengeUrl, launcherVersion)
@@ -602,53 +592,22 @@ async function attestInstallation(
         && fresh.policyVersion === challenge.policyVersion
         && fresh.packVersion === challenge.packVersion
         && (fresh.clientPatchMode ?? "clean") === clientPatchMode
-        && JSON.stringify(fresh.hwidSlots ?? HWID_CORE_SLOTS) === JSON.stringify(hwidSlots)
       ) {
         challenge = fresh;
       }
     }
-    // The fingerprint this launch was asked for (#320 §B): the slots the signed
-    // challenge names, or the core five for a server that names none.
-    const hwid = await hwidPromise;
-    // Sign with the TPM-backed key when the machine has one; null when it does
-    // not, and the launch proceeds without it. The message binds the
-    // (single-use) challengeId to the fingerprint exactly as the ticket will
-    // carry it (#320 §C): neither can be swapped under the other, and the
-    // single-use challenge stops replay. The server decides (behind its own
-    // flag) whether a missing proof is acceptable.
-    const bindingMessage = tpmBindingMessage(challenge.challengeId, hwid);
-    // Both TPM steps sign the same message; run them side by side.
-    const [tpmProof, anchor] = await Promise.all([
-      collectTpmProof(bindingMessage).catch(() => null),
-      collectTpmAnchor(bindingMessage).catch(() => null),
-    ]);
-    // Level-2 anchor (#320 §A): the TPM identity key signs the same message,
-    // and the server is told which endorsement key it lives under — a
-    // credential activation the first time, one confirming request after.
-    // Observe only: a machine without it launches exactly as before.
-    if (anchor !== null) {
-      const enrolment = await enrolTpmAnchor(
-        { beginUrl: runtime.tpmEnrolBeginUrl, completeUrl: runtime.tpmEnrolCompleteUrl },
-        playerKey,
-        launcherVersion,
-        anchor,
-      ).catch(() => null);
-      if (enrolment !== null && enrolment.state !== "activated") {
-        console.warn("TPM anchor not activated", enrolment);
-      }
-    }
     return {
       status: "attested",
-      block: buildAttestationResult(challenge, measurement, launcherVersion, tpmProof, anchor?.proof ?? null),
-      hwid,
+      block: buildAttestationResult(challenge, measurement, launcherVersion),
       clientPatchMode,
     };
   } catch (error) {
     attestationProgress = null;
-    // LOCAL EDIT: a server minimum-version rejection is not turned into a local
-    // gate. The fork never self-updates, so it treats the refusal like any
-    // other unreachable attestation - carry the reason and continue with the
-    // cached mode. The server still decides whether the ticket is issued.
+    // A minimum-version rejection is authoritative and must reach the Play
+    // handler so it can lock the button and surface the mandatory updater UI.
+    if (error instanceof Error && "code" in error && error.code === "launcher_update_required") {
+      throw error;
+    }
     // No policy published / attestation unconfigured: it does not apply, and
     // the launch proceeds silently exactly as before enforcement existed.
     if (error instanceof AttestationUnavailableError && error.notApplicable) {
@@ -718,7 +677,6 @@ async function snapshot(): Promise<LauncherSnapshot> {
       ? MAIN_COPY[currentLocale].inputProfile[inputProfileRecovery.restored ? "restored" : "reset"](inputProfileRecovery.damagedCopy)
       : null,
     gamePid,
-    anticheatEnabled,
     updateRequired: updateRequired || launcherUpdateBlocksPlay(launcherUpdate.state),
     canPlay:
       phase === "ready"
@@ -1268,9 +1226,6 @@ function registerIpc(): void {
       const launchCredential = identityFromPlayerKey(selectedKey);
       const launchRuntime = activeRuntime();
       phase = "launching";
-      // LOCAL EDIT: one synthetic machine identity per Play click - the HWID
-      // vector and the signing key are both replaced before attestation runs.
-      rotateIdentity();
       lastErrorRaw = null;
       inputProfileRecovery = null;
       await broadcastSnapshot();
@@ -1296,8 +1251,7 @@ function registerIpc(): void {
           bundledVivoxProxyPath: resolveBundledVivoxProxyPath(),
           bundledVivoxRuntimePath: resolveBundledVivoxRuntimePath(),
           bundledGameplayPatchPath: resolveBundledGameplayPatchPath(),
-          loadAnticheatModule: anticheatEnabled,
-          bundledAnticheatModulePath: resolveBundledAnticheatModulePath(),
+          bundledRotkcPath: resolveBundledRotkcPath(),
           clientPatchModeFallback:
             await readCachedGameplayPatchMode(join(app.getPath("userData"))) ?? "patched",
           attest: () => attestInstallation(launchCredential.playerKey, launchRuntime),
@@ -1306,9 +1260,6 @@ function registerIpc(): void {
           presence: discordPresence,
           // Shown by the snapshot that onExit broadcasts right after.
           onEarlyExit: (message) => { lastErrorRaw = message; },
-          // Best-effort hardware fingerprint; the server hashes it. A failure
-          // must never block a launch, so it degrades to no HWID signal.
-          fallbackHwid: () => collectHwid(),
           onInputProfileRecovered: (recovery) => {
             inputProfileRecovery = recovery;
             void broadcastSnapshot();
@@ -1327,9 +1278,15 @@ function registerIpc(): void {
       } catch (error) {
         if (diagnosticLaunch) await diagnostics.launchFailed(diagnosticLaunch.id, error).catch(() => undefined);
         const result = operationError<{ pid: number }>(error);
-        // LOCAL EDIT: a server version refusal stays a plain, retryable error.
-        // The fork never self-updates, so it must not latch a permanent
-        // "update required" gate on the player.
+        // A version refusal is authoritative: block Play until a newer
+        // launcher is installed. This build's updater is disabled, so the
+        // check reports idle and the modal only states that the server
+        // requires a newer launcher. Any other failure stays retryable, so it
+        // must not set the flag.
+        if (error instanceof Error && "code" in error && error.code === "launcher_update_required") {
+          updateRequired = true;
+          void launcherUpdate.check().catch(() => undefined);
+        }
         phase = "ready";
         await broadcastSnapshot();
         if (quitWhenGameExits && !mainWindow && !diagnosticWorkInProgress()) app.quit();
@@ -1440,24 +1397,6 @@ function registerIpc(): void {
       assetSyncWarning = null;
       await broadcastSnapshot();
       return { ok: true };
-    }),
-  );
-
-  // LOCAL EDIT (fork): testing toggle - stage or remove ROTK's rotkc.dll so the
-  // bundled Vivox proxy loads (or never loads) the anticheat module. Applied at
-  // the next launch; off by default.
-  ipcMain.handle(
-    IPC_CHANNELS.setAnticheatEnabled,
-    trustedHandler(async (_event, enabled: unknown): Promise<OperationResult<LauncherSnapshot>> => {
-      if (typeof enabled !== "boolean") throw new Error("Unsupported anticheat setting");
-      if (gameLauncher.isRunning() || phase === "launching" || phase === "running" || phase === "installing") {
-        return { ok: false, error: MAIN_COPY[currentLocale].anticheat.settings };
-      }
-      const config = await configStore.load();
-      await configStore.save({ ...config, loadAnticheatModule: enabled });
-      anticheatEnabled = enabled;
-      await broadcastSnapshot();
-      return { ok: true, value: await snapshot() };
     }),
   );
 
@@ -1595,7 +1534,6 @@ async function initialize(): Promise<void> {
   const config = await configStore.load();
   startupLog.mark("config-loaded");
   assetSyncEnabled = config.assetSyncEnabled ?? true;
-  anticheatEnabled = config.loadAnticheatModule === true;
   selectedServerId = config.serverId ?? DEFAULT_SERVER_ID;
   selectedRole = config.role ?? DEFAULT_PLAYER_ROLE;
   const assetState = await assetSync.readState().catch(() => null);
@@ -1627,10 +1565,11 @@ async function initialize(): Promise<void> {
     void cleanupInstallLeftovers(config.installation.root).catch(() => undefined);
   }
   launcherUpdate = new LauncherUpdateService({
-    // LOCAL EDIT: this is a patched build; an official update would replace
-    // it with the unpatched launcher. The updater is therefore inert here,
-    // exactly as it already is in development: the check reports "idle" and
-    // nothing is ever downloaded or installed. Re-enable by restoring the
+    // LOCAL EDIT: self-update is disabled in this fork; newer builds are
+    // installed manually. The updater is inert, exactly as it is in
+    // development: the check reports "idle" and nothing is downloaded or
+    // installed. A server version refusal still blocks Play (see the play
+    // handler). Re-enable by restoring
     // `app.isPackaged ? electronUpdater.autoUpdater : null` below.
     updater: null,
     onChange: () => void broadcastSnapshot(),

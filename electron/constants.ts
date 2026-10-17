@@ -54,10 +54,9 @@ export function resolveBundledGameplayPatchPath(): string {
     : join(app.getAppPath(), "resources", "patches", "dinput8.dll");
 }
 
-// LOCAL EDIT (fork): bundled so the "load anticheat module" testing toggle can
-// stage it on demand. It is never copied or loaded unless the player turns the
-// toggle on (see services/anticheat-module.ts).
-export function resolveBundledAnticheatModulePath(): string {
+// The anticheat module the Vivox proxy loads; staged before every launch
+// (see services/anticheat-module.ts).
+export function resolveBundledRotkcPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "patches", "rotkc.dll")
     : join(app.getAppPath(), "resources", "patches", "rotkc.dll");

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,6 @@ import {
   ANTICHEAT_MODULE_FILE_NAME,
   ANTICHEAT_MODULE_SHA256,
   installAnticheatModule,
-  removeAnticheatModule,
 } from "../electron/services/anticheat-module.js";
 
 const workspaces: string[] = [];
@@ -28,6 +28,13 @@ afterEach(async () => {
 });
 
 describe("anticheat module staging", () => {
+  it("bundles the upstream 2.0.41 module the pin names", async () => {
+    const bundled = await readFile(bundledModule);
+    expect(bundled.length).toBe(ANTICHEAT_MODULE_BYTES);
+    expect(createHash("sha256").update(bundled).digest("hex")).toBe(ANTICHEAT_MODULE_SHA256);
+    expect(ANTICHEAT_MODULE_SHA256).toBe("4765861dc893a103f531874e18970ea5b99755d0e5eafa60f710aaba0067a6ed");
+  });
+
   it("copies the pinned module into the game and is idempotent", async () => {
     const { root, destination } = await fixture();
 
@@ -36,6 +43,14 @@ describe("anticheat module staging", () => {
     expect(installed.length).toBe(ANTICHEAT_MODULE_BYTES);
     expect(installed.subarray(0, 2).toString("ascii")).toBe("MZ");
     await expect(installAnticheatModule(root, bundledModule)).resolves.toBe("up-to-date");
+  });
+
+  it("replaces a stale or foreign rotkc.dll with the pinned module", async () => {
+    const { root, destination } = await fixture();
+    await writeFile(destination, "stale anticheat module");
+
+    await expect(installAnticheatModule(root, bundledModule)).resolves.toBe("installed");
+    expect(createHash("sha256").update(await readFile(destination)).digest("hex")).toBe(ANTICHEAT_MODULE_SHA256);
   });
 
   it("refuses a bundled module that does not match the pin", async () => {
@@ -47,20 +62,11 @@ describe("anticheat module staging", () => {
     await expect(stat(destination)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("removes a staged module and reports absence idempotently", async () => {
-    const { root, destination } = await fixture();
-    await installAnticheatModule(root, bundledModule);
-
-    await expect(removeAnticheatModule(root)).resolves.toBe("removed");
-    await expect(stat(destination)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(removeAnticheatModule(root)).resolves.toBe("absent");
-  });
-
-  it("leaves a directory named rotkc.dll untouched", async () => {
+  it("fails the launch rather than replacing a directory named rotkc.dll", async () => {
     const { root, destination } = await fixture();
     await mkdir(destination);
 
-    await expect(removeAnticheatModule(root)).rejects.toThrow(/anticheat/i);
+    await expect(installAnticheatModule(root, bundledModule)).rejects.toThrow(/anticheat/i);
     await expect(stat(destination).then((entry) => entry.isDirectory())).resolves.toBe(true);
   });
 });

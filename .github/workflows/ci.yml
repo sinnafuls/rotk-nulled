@@ -84,8 +84,9 @@ jobs:
           $allowedGameplayDll = [System.IO.Path]::GetFullPath(
             (Join-Path $env:GITHUB_WORKSPACE "resources\patches\dinput8.dll")
           )
-          # Bundled for the fork's "load anticheat module" testing toggle; never
-          # copied or loaded unless the player turns the toggle on.
+          # Temporary closed-source anticheat module, until it has its own
+          # distribution. Supplied by upstream 2.0.40 (docs/RELEASE_2_0_40.md);
+          # the launcher stages it on every game start.
           $allowedRotkcDll = [System.IO.Path]::GetFullPath(
             (Join-Path $env:GITHUB_WORKSPACE "resources\patches\rotkc.dll")
           )
@@ -104,6 +105,11 @@ jobs:
           $gameplaySidecar = ((Get-Content -LiteralPath "$allowedGameplayDll.sha256" -Raw) -split "\s+")[0]
           if ($gameplaySidecar -ne $gameplayHash.ToLowerInvariant()) {
             throw "Le sidecar dinput8.dll.sha256 ne correspond pas au DLL : $gameplaySidecar"
+          }
+
+          $rotkcHash = (Get-FileHash -LiteralPath $allowedRotkcDll -Algorithm SHA256).Hash
+          if ($rotkcHash -ne "4765861DC893A103F531874E18970EA5B99755D0E5EAFA60F710AABA0067A6ED") {
+            throw "Unexpected rotkc.dll SHA-256 (expected the upstream 2.0.40 supplied module): $rotkcHash"
           }
 
           $vivoxHash = (Get-FileHash -LiteralPath $allowedVivoxDll -Algorithm SHA256).Hash
@@ -134,6 +140,7 @@ jobs:
         shell: pwsh
         run: |
           npm run build:shim
+          if ($LASTEXITCODE -ne 0) { throw "Le build du shim a echoue." }
           $shim = Join-Path $env:GITHUB_WORKSPACE "native\steamshim\dist\steam_api64.dll"
           if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) {
             throw "Le build du shim n'a produit aucun DLL."

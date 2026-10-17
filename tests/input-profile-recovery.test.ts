@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAIN_COPY } from "../electron/i18n.js";
 import { gameLauncherInternals, type LaunchRequest } from "../electron/services/game-launcher.js";
@@ -209,7 +210,7 @@ describe("client preparation", () => {
     const f = await fixture(damaged["truncated inside a later ActionSet"]);
     // steam_api64.dll already holds the bundled shim, as it does once the launch
     // path has deployed it (#135 moves that copy before attestation).
-    for (const name of ["bundled-shim.dll", "bundled-rotkc.dll", "steam_api64.dll"]) await writeFile(join(f.root, name), "fixture bytes");
+    for (const name of ["bundled-shim.dll", "steam_api64.dll"]) await writeFile(join(f.root, name), "fixture bytes");
     await writeFile(join(f.root, "ClientConfig.ini"), "[Client]\n");
     const onInputProfileRecovered = vi.fn();
     const request: LaunchRequest = {
@@ -219,7 +220,7 @@ describe("client preparation", () => {
       runtime: RUNTIME_CONFIGS.test, locale: "en", logsRoot: f.logsRoot,
       bundledShimPath: join(f.root, "bundled-shim.dll"), bundledVivoxProxyPath: join(f.root, "unused-proxy.dll"),
       bundledVivoxRuntimePath: join(f.root, "unused-runtime.dll"), bundledGameplayPatchPath: join(f.root, "unused-dinput8.dll"),
-      bundledAnticheatModulePath: join(f.root, "bundled-rotkc.dll"), loadAnticheatModule: false, clientPatchModeFallback: "clean",
+      bundledRotkcPath: fileURLToPath(new URL("../resources/patches/rotkc.dll", import.meta.url)), clientPatchModeFallback: "clean",
       onInputProfileRecovered, onExit: vi.fn(),
     };
     const identity = { ticket: "test-only-ticket", displayName: "FixturePlayer", steamId: "76561190000000000" } as LaunchTicketIdentity;

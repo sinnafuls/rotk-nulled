@@ -3,8 +3,6 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
-let currentLogsRoot = syntheticLogsRoot();
-
 import { retryFs } from "./fs-safe.js";
 import { promisify } from "node:util";
 import type { InstalledClientConfig, LauncherConfig } from "./config-store.js";
@@ -15,8 +13,7 @@ import type { AppLocale } from "../../shared/locale.js";
 import { validateInstallDestination } from "./path-policy.js";
 import type { PlayerIdentity } from "./player-identity.js";
 import { startLocalSessionGateway } from "./session-gateway.js";
-import { syntheticLogsRoot } from "./synthetic-identity.js";
-import { installAnticheatModule, removeAnticheatModule } from "./anticheat-module.js";
+import { installAnticheatModule } from "./anticheat-module.js";
 import { readInstallationMarker } from "./installer.js";
 import { assertVisualCppRuntime } from "./visual-cpp-runtime.js";
 import {
@@ -39,6 +36,14 @@ const GAME_STARTUP_STABILITY_MS = 3_000;
 // then closes this soon after its spawn with anything but exit code 0, that
 // code is the only clue the player can pass on.
 const GAME_EARLY_EXIT_MS = 60_000;
+// Game log directory named on H1Z1's command line: one random name per
+// launcher process, carrying neither the Windows user name nor the install id.
+const ANONYMOUS_LOGS_ROOT = join(
+  `${process.env.SystemDrive || "C:"}\\`,
+  "ProgramData",
+  "Temp",
+  randomUUID().replaceAll("-", "").slice(0, 12),
+);
 
 /**
  * What one attestation attempt produced.
@@ -54,13 +59,6 @@ export type AttestationOutcome =
   | {
       readonly status: "attested";
       readonly block: unknown;
-      /**
-       * The fingerprint read for the slots the challenge asked (#320 Â§B). It
-       * is what the TPM proof inside the block was signed over, so the ticket
-       * request must carry exactly this object and not a fingerprint read at
-       * another time.
-       */
-      readonly hwid?: Record<string, string>;
       /** Server-directed shotgun sprint client-patch mode for this launch. */
       readonly clientPatchMode: GameplayPatchMode;
     }
@@ -82,10 +80,8 @@ export interface LaunchRequest {
   bundledVivoxProxyPath: string;
   bundledVivoxRuntimePath: string;
   bundledGameplayPatchPath: string;
-  /** LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll into the game. */
-  loadAnticheatModule: boolean;
-  /** LOCAL EDIT (fork): the pinned rotkc.dll staged when the toggle is on. */
-  bundledAnticheatModulePath: string;
+  /** Pinned upstream rotkc.dll, staged into the game root before every launch. */
+  bundledRotkcPath: string;
   /**
    * Mode reapplied when the server does not run attestation (development or
    * unconfigured backend). The production path always uses the signed
@@ -100,11 +96,6 @@ export interface LaunchRequest {
   attest?: () => Promise<AttestationOutcome>;
   /** This launcher's version, sent so the server's update gate can act. */
   launcherVersion?: string;
-  /**
-   * Raw hardware fingerprint for a launch that could not attest (an attested
-   * launch already carries one). Only called when needed: it runs PowerShell.
-   */
-  fallbackHwid?: () => Promise<Record<string, string>>;
   /** Best-effort telemetry only. Diagnostic failures never control the game lifecycle. */
   diagnostics?: GameLaunchDiagnostics;
   /** Optional local presence; failures never control the game lifecycle. */
@@ -134,25 +125,19 @@ function diagnosticCallback(callback: (() => void) | undefined): void {
 }
 
 /**
- * Turn an attestation outcome plus the launcher's version and fingerprint into
- * the ticket request options. A clean measurement carries its block; a
- * not-applicable one carries nothing; an unavailable one records why so an
- * enforced refusal can name the real cause. The version and HWID ride along
- * regardless, so the update gate and HWID capture work even with no attestation.
+ * Turn an attestation outcome plus the launcher's version into the ticket
+ * request options. A clean measurement carries its block; a not-applicable one
+ * carries nothing; an unavailable one records why so an enforced refusal can
+ * name the real cause. The version rides along regardless so the update gate
+ * works even with no attestation. No hardware fingerprint is sent: the server
+ * decides whether a launch without one is admitted.
  */
 async function ticketRequestOptions(
   request: LaunchRequest,
   outcome: AttestationOutcome,
-): Promise<{ attestation?: unknown; attestationUnavailableReason?: string; launcherVersion?: string; hwid?: Record<string, string> }> {
-  const base: { launcherVersion?: string; hwid?: Record<string, string> } = {};
+): Promise<{ attestation?: unknown; attestationUnavailableReason?: string; launcherVersion?: string }> {
+  const base: { launcherVersion?: string } = {};
   if (request.launcherVersion) base.launcherVersion = request.launcherVersion;
-  // An attested launch answers the slots its challenge named, and its TPM proof
-  // is bound to that exact vector; the fingerprint read before the launch is
-  // the fallback for a launch that could not attest.
-  const hwid = outcome.status === "attested" && outcome.hwid !== undefined
-    ? outcome.hwid
-    : await request.fallbackHwid?.().catch(() => ({}));
-  if (hwid && Object.keys(hwid).length > 0) base.hwid = hwid;
   if (outcome.status === "attested") return { ...base, attestation: outcome.block };
   if (outcome.status === "unavailable") {
     return { ...base, attestationUnavailableReason: outcome.reason };
@@ -254,6 +239,9 @@ async function prepareClient(
   // steering configuration and execution to a different tree.
   await assertExecutableNotRunning(join(root, "H1Z1.exe"));
   await assertSteamShim(root, request.bundledShimPath);
+  // The bundled Vivox proxy loads rotkc.dll by name from the game root; the
+  // pinned upstream module is verified and staged before every launch.
+  await installAnticheatModule(root, request.bundledRotkcPath);
   await assertVivoxCompatibility(root);
   // The attestation pass has already installed or removed the shotgun sprint
   // proxy for the mode the server directed; preparation only rechecks it so a
@@ -311,18 +299,14 @@ async function updateUserOptions(root: string, update: (options: string) => stri
 function buildLaunchArguments(
   launchTicket: string,
   runtime: RuntimeConfig,
-  logsRoot: string,
-  installId: string,
   localCreateSessionUrl: string,
   locale: AppLocale,
 ): string[] {
   const gatewayCreateSession = validateLocalCreateSessionUrl(localCreateSessionUrl);
   const voiceGrantOrigin = validateVoiceGrantOrigin(runtime.voiceGrantOrigin);
-  // LOCAL EDIT: the log paths on the game's command line carried the Windows
-  // user name and the install id; the directory chosen for this launch
-  // carries neither, and the game's own launch telemetry is pointed at
-  // loopback where nothing is listening.
-  const logs = currentLogsRoot;
+  // The game's own launch telemetry is pointed at loopback, where nothing
+  // listens, and its log paths carry no user name or install id.
+  const logs = ANONYMOUS_LOGS_ROOT;
   const localLogs = join(logs, "local");
   const failureLogs = join(logs, "failure");
   return [
@@ -448,18 +432,6 @@ export class GameLauncher {
     await mkdir(localLogs, { recursive: true });
     await mkdir(failureLogs, { recursive: true });
 
-    // LOCAL EDIT (fork): the Vivox proxy loads rotkc.dll by name from the game
-    // root, so the testing toggle is applied by staging or removing the file
-    // before attestation and before the spawn. Off (the default) removes any
-    // copy, including a stale one left by another launcher build, and the
-    // module can never load. rotkc itself never reads the module list, and the
-    // cheat reaches the client through the unhooked PlayClient global whether
-    // the module is present or not (verification/rotk_game_dlls.md section 13).
-    if (request.loadAnticheatModule) {
-      await installAnticheatModule(installationRoot, request.bundledAnticheatModulePath);
-    } else {
-      await removeAnticheatModule(installationRoot);
-    }
     // Repair the mandatory Vivox/crouch compatibility proxy before
     // attestation. The shotgun sprint proxy is applied by the attestation pass
     // itself, once the signed challenge has named its mode; a foreign
@@ -533,8 +505,6 @@ export class GameLauncher {
       const args = buildLaunchArguments(
         launchIdentity.ticket,
         request.runtime,
-        request.logsRoot,
-        installation.installId,
         sessionGateway.createSessionUrl,
         request.locale,
       );

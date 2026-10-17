@@ -18,8 +18,6 @@ const runtime: RuntimeConfig = {
   websiteOrigin: "https://rotk.app",
   launchTicketUrl: "https://accounts.rotk.app/createLaunchTicket",
   attestationChallengeUrl: "https://accounts.rotk.app/beginLauncherAttestation",
-  tpmEnrolBeginUrl: "https://accounts.rotk.app/api/launcher/tpm/enroll-begin",
-  tpmEnrolCompleteUrl: "https://accounts.rotk.app/api/launcher/tpm/enroll-complete",
 };
 const authKey = "0123456789abcdef0123456789abcdef";
 const localCreateSessionUrl = "http://127.0.0.1:49152/rest/auth/session/create";
@@ -67,6 +65,9 @@ describe("ClientConfig synchronization", () => {
     expect(once).toContain(`SteamGatewayUrl=${localCreateSessionUrl}`);
     expect(once).not.toContain(authKey);
     expect(once).toContain("SoeAuthTicketUrl=https://gateway.rotk.app/rest/client/session/create");
+    // Launch telemetry stays on loopback; it never reaches the gateway.
+    expect(once).toContain("Url=http://127.0.0.1:15081/h1z1xx/live/");
+    expect(once).not.toContain("gateway.rotk.app/h1z1xx");
   });
 
   it("inserts root directives before the first INI section", () => {

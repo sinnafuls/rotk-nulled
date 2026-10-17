@@ -216,10 +216,14 @@ int main(int argc, char **argv) {
             observe_xml_event("<Event type=\"MediaStreamUpdatedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sip:confctl-g-test.group@domain</SessionHandle><StatusCode>503</StatusCode><State>1</State></Event>", 20U);
             observe_xml_event("<Event type=\"SessionRemovedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sip:confctl-g-test.group@domain</SessionHandle></Event>", 25U);
             assert(g_voice_rooms[0].media_failed && g_voice_rooms[0].removed);
-            assert(WaitForSingleObject(notified, 12000U) == WAIT_OBJECT_0);
-            assert(vx_get_message(&message) == 0 && message == NULL);
-            assert(WaitForSingleObject(notified, 6000U) == WAIT_OBJECT_0);
-            assert(vx_get_message(&message) == 0 && message == NULL);
+            /* Callbacks announce work; SDK notifications may also wake us.
+             * Pump until the rejoin is submitted, not for a fixed wake count. */
+            ULONGLONG rejoin_deadline = GetTickCount64() + 18000U;
+            while (sdk_calls < calls + 2) {
+                ULONGLONG now = GetTickCount64(); assert(now < rejoin_deadline);
+                assert(WaitForSingleObject(notified, (DWORD)(rejoin_deadline - now)) == WAIT_OBJECT_0);
+                assert(vx_get_message(&message) == 0 && message == NULL);
+            }
             assert(sdk_calls == calls + 2 && g_voice_rooms[0].rejoins == 1U);
             g_voice_rooms[0].has_mute = g_voice_rooms[0].has_volume = TRUE;
             g_voice_rooms[0].speaker_mute = 1; g_voice_rooms[0].speaker_volume = 35;
@@ -247,11 +251,13 @@ int main(int argc, char **argv) {
             assert(uri && !strcmp(uri, "sip:confctl-g-test.group@domain")); assert(destroy_event(event) == 0);
             observe_xml_event("<Event type=\"MediaStreamUpdatedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sdk-room-42</SessionHandle><StatusCode>503</StatusCode><State>1</State></Event>", 20U);
             observe_xml_event("<Event type=\"SessionRemovedEvent\"><SessionGroupHandle>test-group</SessionGroupHandle><SessionHandle>sdk-room-42</SessionHandle></Event>", 25U);
-            assert(WaitForSingleObject(notified, 12000U) == WAIT_OBJECT_0);
-            assert(vx_get_message(&message) == 0 && message == NULL);
-            assert(WaitForSingleObject(notified, 6000U) == WAIT_OBJECT_0);
-            assert(vx_get_message(&message) == 0 && message == NULL);
-            assert(sdk_calls == calls + 2);
+            ULONGLONG rejoin_deadline = GetTickCount64() + 18000U;
+            while (sdk_calls < calls + 2) {
+                ULONGLONG now = GetTickCount64(); assert(now < rejoin_deadline);
+                assert(WaitForSingleObject(notified, (DWORD)(rejoin_deadline - now)) == WAIT_OBJECT_0);
+                assert(vx_get_message(&message) == 0 && message == NULL);
+            }
+            assert(sdk_calls == calls + 2 && g_voice_rooms[0].rejoins == 1U);
         }
         assert(WaitForSingleObject(server, 1000U) == WAIT_OBJECT_0); assert(attempts == (scenario == 1 ? 3 : scenario == 6 || scenario == 11 || scenario == 12 ? 2 : scenario == 9 ? 4 : 1));
         if (scenario == 4) {

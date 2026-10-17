@@ -64,8 +64,6 @@ describe("public ROTK runtime", () => {
     const args = gameLauncherInternals.buildLaunchArguments(
       "T".repeat(43),
       RUNTIME_CONFIGS.test,
-      "C:\\ROTK\\logs",
-      "install-1",
       "http://127.0.0.1:49152/rest/auth/session/create",
       "en",
     );
@@ -84,8 +82,6 @@ describe("public ROTK runtime", () => {
     const args = gameLauncherInternals.buildLaunchArguments(
       launchTicket,
       DEFAULT_RUNTIME_CONFIG,
-      "C:\\ROTK\\logs",
-      "install-1",
       "http://127.0.0.1:49152/rest/auth/session/create",
       "fr",
     );
@@ -107,14 +103,20 @@ describe("public ROTK runtime", () => {
     expect(args.join(" ")).not.toMatch(
       /token.?key|private.?key|client.?secret|password/i,
     );
+    // Game log paths name neither the install id nor a user profile.
+    const logging = args.filter((argument) => argument.startsWith("Logging:") && argument.includes("Directory="));
+    expect(logging).toHaveLength(3);
+    for (const argument of logging) {
+      expect(argument).not.toContain("install-1");
+      expect(argument.toLowerCase()).not.toContain("\\users\\");
+    }
+    expect(args).toContain("LaunchTelemetry:Url=http://127.0.0.1:15081/h1z1xx/live/");
   });
 
   it("launches the game with the Chinese locale when Chinese is selected", () => {
     const args = gameLauncherInternals.buildLaunchArguments(
       "T".repeat(43),
       DEFAULT_RUNTIME_CONFIG,
-      "C:\\ROTK\\logs",
-      "install-1",
       "http://127.0.0.1:49152/rest/auth/session/create",
       "zh",
     );

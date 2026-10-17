@@ -205,12 +205,6 @@ export interface Copy {
     restore: string;
     autoSync: string;
   };
-  anticheat: {
-    title: string;
-    enable: string;
-    description: string;
-    settings: string;
-  };
 }
 
 const COPY: Record<AppLocale, Copy> = {
@@ -439,12 +433,6 @@ const COPY: Record<AppLocale, Copy> = {
       restore: "RESTORE VANILLA CLIENT",
       autoSync: "Update the custom assets automatically",
     },
-    anticheat: {
-      title: "ANTICHEAT MODULE",
-      enable: "Load rotkc.dll into the game (testing only)",
-      description: "Off by default: the launcher never copies or loads ROTK's rotkc.dll. Turn it on to load the real anticheat module for memory analysis — it is staged into the game folder before launch and removed again when you turn it back off.",
-      settings: "Cannot change the anticheat toggle while installing or playing.",
-    },
   },
   fr: {
     diagnostics: DIAGNOSTICS_COPY.fr,
@@ -671,12 +659,6 @@ const COPY: Record<AppLocale, Copy> = {
       restore: "RESTAURER LE CLIENT VANILLA",
       autoSync: "Mettre à jour les assets personnalisés automatiquement",
     },
-    anticheat: {
-      title: "MODULE ANTICHEAT",
-      enable: "Charger rotkc.dll dans le jeu (test uniquement)",
-      description: "Désactivé par défaut : le launcher ne copie ni ne charge jamais le rotkc.dll de ROTK. Active cette option pour charger le vrai module anticheat (analyse mémoire) — il est placé dans le dossier du jeu avant le lancement, puis retiré dès que tu la désactives.",
-      settings: "Impossible de changer le module anticheat pendant une installation ou une partie.",
-    },
   },
   zh: {
     diagnostics: DIAGNOSTICS_COPY.zh,
@@ -902,12 +884,6 @@ const COPY: Record<AppLocale, Copy> = {
       verify: "验证文件",
       restore: "恢复原版客户端",
       autoSync: "自动更新 ROTK 定制资源",
-    },
-    anticheat: {
-      title: "反作弊模块",
-      enable: "将 rotkc.dll 加载到游戏中（仅用于测试）",
-      description: "默认关闭：启动器不会复制或加载 ROTK 的 rotkc.dll。开启后会加载真正的反作弊模块（用于内存分析）——启动前放入游戏目录，关闭后自动移除。",
-      settings: "安装或游戏中无法切换反作弊模块。",
     },
   },
 };

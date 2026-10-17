@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 const pinnedAnticheatModule = fileURLToPath(new URL('../resources/patches/rotkc.dll', import.meta.url));
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), gatewayClose: vi.fn(async () => undefined),
-  deployVoice: vi.fn(async () => undefined), checkVoice: vi.fn(async () => undefined) }));
+  deployVoice: vi.fn(async () => undefined), checkVoice: vi.fn(async () => undefined),
+  createTicket: vi.fn(async (..._args: unknown[]) => ({ ticket: 'test-only-ticket', displayName: 'FixturePlayer', steamId: '76561190000000000' })) }));
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
 vi.mock('../electron/services/path-policy.js', () => ({ validateInstallDestination: async (root: string) => root }));
 vi.mock('../electron/services/installer.js', () => ({ readInstallationMarker: async () => ({ schemaVersion: 1, installId: 'fixture' }) }));
@@ -28,7 +29,7 @@ vi.mock('../electron/services/client-config.js', () => ({ synchronizeClientConfi
   synchronizeGraphicsOptions: (current: string) => `${current}OverallQuality=-1\n`,
   validateLocalCreateSessionUrl: (url: string) => url }));
 vi.mock('../electron/services/launch-ticket.js', () => ({ assertLaunchTicketFresh: () => undefined,
-  createLaunchTicket: async () => ({ ticket: 'test-only-ticket', displayName: 'FixturePlayer', steamId: '76561190000000000' }) }));
+  createLaunchTicket: mocks.createTicket }));
 vi.mock('../electron/services/session-gateway.js', () => ({
   startLocalSessionGateway: async () => ({ createSessionUrl: 'http://127.0.0.1:45678/createsession', close: mocks.gatewayClose }),
 }));
@@ -51,6 +52,7 @@ beforeEach(() => {
   mocks.deployVoice.mockClear();
   mocks.checkVoice.mockReset().mockResolvedValue(undefined);
   mocks.gatewayClose.mockClear();
+  mocks.createTicket.mockClear();
   mocks.spawn.mockReset().mockImplementation(() => { const child = new GameChild(); children.push(child); return child; });
 });
 afterEach(async () => {
@@ -65,7 +67,7 @@ function deferred() { let resolve!: () => void; const promise = new Promise<void
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'rotk-game-lifecycle-test-')); roots.push(root);
   for (const name of ['H1Z1.exe', 'steam_api64.original.dll', 'bundled-shim.dll']) await writeFile(join(root, name), 'fixture bytes');
-  // LOCAL EDIT (fork): a stale anticheat module must be removed before launch.
+  // A module left by another launcher build is replaced by the pinned one.
   await writeFile(join(root, 'rotkc.dll'), 'stale anticheat module');
   await writeFile(join(root, 'ClientConfig.ini'), '[Client]\n');
   const diagnostics: GameLaunchDiagnostics = { onIdentity: vi.fn(), onSpawned: vi.fn(), onOutput: vi.fn(), onExit: vi.fn(async () => undefined) };
@@ -75,7 +77,7 @@ async function fixture() {
     identity: { playerKey: 'test-only-player-key' } as LaunchRequest['identity'],
     runtime: RUNTIME_CONFIGS.test, locale: 'en', logsRoot: join(root, 'logs'), bundledShimPath: join(root, 'bundled-shim.dll'),
     bundledVivoxProxyPath: join(root, 'unused-proxy.dll'), bundledVivoxRuntimePath: join(root, 'unused-runtime.dll'),
-    bundledGameplayPatchPath: join(root, 'unused-dinput8.dll'), loadAnticheatModule: false, bundledAnticheatModulePath: join(root, 'unused-rotkc.dll'), clientPatchModeFallback: 'clean',
+    bundledGameplayPatchPath: join(root, 'unused-dinput8.dll'), bundledRotkcPath: pinnedAnticheatModule, clientPatchModeFallback: 'clean',
     diagnostics, onExit: vi.fn(),
   };
   return { launcher: new GameLauncher(), request, diagnostics, child: () => children.at(-1)! };
@@ -173,7 +175,7 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(userProfile).toContain('<Trigger>Shift+M</Trigger>');
     expect(userProfile).toContain('<Trigger>Shift+Tab</Trigger>');
     expect(await readFile(join(clientRoot, 'InputProfile_Default.xml'), 'utf8')).toBe(defaultProfile);
-    expect(await readFile(join(clientRoot, 'rotkc.dll'), 'utf8').catch(() => null)).toBeNull();
+    expect((await readFile(join(clientRoot, 'rotkc.dll'))).length).toBe(ANTICHEAT_MODULE_BYTES);
     prepared.resolve();
     await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
     f.child().exit(0);
@@ -230,16 +232,29 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(f.child().kill).not.toHaveBeenCalled();
   });
 
-  it('stages the pinned anticheat module only when the toggle is on', async () => {
+  it('stages the pinned anticheat module on every launch, replacing a stale copy', async () => {
     const f = await fixture();
     expect(await readFile(join(f.request.config.installation!.root, ANTICHEAT_MODULE_FILE_NAME), 'utf8')).toBe('stale anticheat module');
-    f.request.loadAnticheatModule = true;
-    f.request.bundledAnticheatModulePath = pinnedAnticheatModule;
     const launched = f.launcher.launch(f.request).catch(error => error);
     await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
     const staged = await readFile(join(f.request.config.installation!.root, ANTICHEAT_MODULE_FILE_NAME));
     expect(staged.length).toBe(ANTICHEAT_MODULE_BYTES);
     expect(staged.subarray(0, 2).toString('ascii')).toBe('MZ');
+    f.child().exit(0);
+    await launched;
+  });
+
+  it('sends the attestation block and version with no hardware fingerprint or TPM evidence', async () => {
+    const f = await fixture();
+    const block = { challengeId: 'c'.repeat(32), evidence: 'e'.repeat(64) };
+    f.request.launcherVersion = '2.0.41';
+    f.request.attest = async () => ({ status: 'attested', block, clientPatchMode: 'clean' });
+    const launched = f.launcher.launch(f.request).catch(error => error);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    expect(mocks.createTicket).toHaveBeenCalledOnce();
+    const options = mocks.createTicket.mock.calls[0][2];
+    expect(options).toEqual({ launcherVersion: '2.0.41', attestation: block });
+    expect(JSON.stringify(options)).not.toMatch(/hwid|tpm/i);
     f.child().exit(0);
     await launched;
   });

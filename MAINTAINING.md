@@ -1,144 +1,40 @@
-# Maintaining the fork
+# Maintaining the privacy fork
 
-## Once, when first cloning
+## Supported contract
 
-```
-git clone https://github.com/sinnafuls/rotk-nulled.git rotk-launcher
-cd rotk-launcher
-git remote add upstream https://github.com/MzKaxD/rotk-launcher.git
-git fetch upstream --tags
-```
+Keep launcher hardware fingerprints and TPM proofs absent, never fabricated. Preserve real account authentication, server-directed integrity policy, and server admission refusals. Always stage the current upstream real anticheat; do not restore the historical anticheat-disable switch or synthetic identity generator.
 
-You'll also need:
-- Node 22 (`nvm-windows` or from nodejs.org)
-- Zig 0.15.2 in `PATH` (portable at `D:\Tools\zig-0.15.2` is fine)
-- .NET 10 SDK for the deathcomm helper
+The anticheat can collect information independently. Do not describe this build as preventing all hardware collection or networking.
 
-## After upstream publishes a new launcher version
+## Updating upstream
 
-```
-cd rotk-launcher
+1. Fetch upstream and record its exact commit and package version. Inspect the complete upstream change, including native binaries and their authoritative hashes/sidecars.
+2. Merge without discarding conflict sides wholesale. Trace each changed contract through producers, IPC, renderer consumers, and tests. Renderer and Electron use separate TypeScript configurations.
+3. Keep privacy omissions explicit. Do not install upstream hardware collectors into an active path, invent hardware IDs, sign TPM evidence with software substitutes, or suppress server refusal.
+4. Keep upstream's current `rotkc.dll` and normal staging/loading path. Verify provenance against upstream, not merely against whatever happens to be on disk. An old binary passing an old local pin is not an update.
+5. Retain per-user packaging and the fork's release destination. An unsigned release must explicitly pass boolean signing configuration and must be labeled unsigned. Do not reference signing/reuse step outputs unless those steps exist.
+6. Update the privacy description, dependencies, and all affected contract tests. Never waive artifact integrity checks merely to make CI green.
 
-# 1. Pull upstream, merge (or rebase — see below).
-git fetch upstream --tags
-git merge upstream/main            # or: git rebase upstream/main
+## Verification before release
 
-# 2. Resolve conflicts. The load-bearing files are marked with
-#    `// LOCAL EDIT (fork)` comments — every hit MUST survive:
-git grep -n "LOCAL EDIT (fork)"
-#      electron/services/machine-identity.ts    (collectHwid -> syntheticHwid)
-#      electron/services/tpm-identity.ts        (collectTpmProof -> synthetic)
-#      electron/services/tpm-anchor.ts          (collectTpmAnchor -> null)
-#      electron/services/client-config.ts       (LaunchTelemetry loopback)
-#      electron/services/game-launcher.ts       (argv loopback, anon logs, removeForeignRotkc)
-#      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
-#      electron/services/game-launcher.ts       (argv loopback, anon logs, anticheat toggle)
-#      electron/services/gameplay-patch.ts      (quarantine an unknown dinput8.dll)
-#      electron/services/anticheat-module.ts    (rotkc pin + stage/remove; off by default)
-#      electron/main.ts                         (rotateIdentity, updater: null, no elevation gate)
-#      .github/workflows/release.yml            (fork hash pins)
-#      package.json                             ("publish" -> sinnafuls)
-#
-#    If upstream re-adds `resources/patches/rotkc.dll` (its anticheat module) or
-#    a Vivox proxy that loads it:
-#      - Keep the fork's rule: never ship, copy, or load `rotkc.dll`. Delete the
-#        bundled binary and re-remove the launch wiring (`git log -S rotkc`).
-#      - `game-launcher.ts` (`removeForeignRotkc`) deletes any copy from the
-#        client; `shared/attestation.ts` no longer exempts it.
-#      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
-#        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
-#
-#      - The fork bundles it only for the "load anticheat module" testing
-#        toggle (services/anticheat-module.ts). Never edit or delete the
-#        bundled binary in a fork commit: `resources/patches/*.dll` are upstream
-#        release inputs, so every sync would conflict. A new upstream rotkc.dll
-#        only needs ANTICHEAT_MODULE_SHA256 / ANTICHEAT_MODULE_BYTES bumped to
-#        match (the binary itself arrives with the rebase).
-#      - Keep upstream's own `resources/patches/vivoxsdk_x64.dll` — the fork
-#        pins no proxy of its own; verify it with `scripts/verify-vivox-proxy.mjs`.
-#
-#    Never commit `.nyx/` (local agent workspace: uploads, scratch); it is
-#    gitignored, and re-adding it makes the next rebase abort on untracked files.
-#
-#    If upstream adds any NEW resources/patches/* DLL, analyze it BEFORE bumping
-#    the version.
-#
-#    If upstream re-adds the administrator-startup gate (a new
-#    electron/services/startup-elevation.ts + `startWithRequiredElevation` in
-#    main.ts), remove it again: initialize() directly in app.whenReady(), keep
-#    `requestedExecutionLevel: asInvoker` and `nsis.perMachine: false`. The
-#    fork never requests UAC.
+Use the locked dependency installation and the same toolchain as CI: Node 22, Zig 0.15.2, and .NET 10. Check `package.json` scripts and the current workflow for the authoritative commands.
 
-# 3. Verify the tree.
-PATH="D:/Tools/zig-0.15.2;$PATH" \
-ZIG_LOCAL_CACHE_DIR="$TEMP/zig-local-cache" \
-  npm run prepare:native
-node scripts/verify-vivox-proxy.mjs
-node scripts/verify-gameplay-patch.mjs
+Run both TypeScript configurations through `npm run typecheck`, the full existing test suite, native artifact verification/build steps, renderer and Electron builds, and the actual Electron Builder NSIS packaging command. Do not treat test compilation or a renderer build as installer verification.
 
-# 4. Build + full test suite + package.
-PATH="D:/Tools/zig-0.15.2;$PATH" \
-ZIG_LOCAL_CACHE_DIR="$TEMP/zig-local-cache" \
-  npm run build
-npx electron-builder --win nsis \
-  --config.forceCodeSigning=false \
-  --config.win.signExecutable=false \
-  --publish never
+Exercise the privacy boundary: no hardware reader or TPM signer runs; no fabricated identity/proof appears in the request; a server refusal remains a refusal. Exercise normal real-anticheat staging and verify the packaged binary against the upstream source artifact. Smoke the packaged launcher without launching the game or transmitting user credentials unless separately authorized.
 
-# `release/ROTK-Launcher-<version>-x64.exe` now exists.
+Inspect packaging output and checksums. Record any unexercised in-game or server-acceptance behavior accurately.
 
-# 5. Sanity-check what the packaged installer will actually deploy:
-sha256sum release/win-unpacked/resources/patches/dinput8.dll \
-          release/win-unpacked/resources/patches/vivoxsdk_x64.dll
-#   expected: 987fa565…  dinput8.dll
-#             d7466229…  vivoxsdk_x64.dll
-#   and confirm no rotkc.dll is packaged:
-ls release/win-unpacked/resources/patches/
-```
+## Release sequencing
 
-## Cutting a release
+The package version tracks upstream; do not invent a newer version to evade server admission rules. Build the intended merged commit, never an imported upstream tag by accident.
 
-The version in `package.json` MIRRORS upstream's, always — the launcher sends
-it on the wire, and ROTK's attestation and ticket routes refuse any version
-upstream has not shipped ("This launcher version is too old to verify the game
-files"; v2.0.37, 2026-10-12). Tag with `v<version>` — the release workflow
-requires the tag to match `package.json.version`. A fork-only change on top of
-an already-released version is shipped by moving that same tag to the new
-commit (`git tag -f v<version> && git push -f origin v<version>`): the workflow
-refreshes the existing release's assets in place (`gh release upload
---clobber`). It never invents a number past upstream.
+For a fork-only release, use a new `v<upstream-version>-fork.N` tag (positive integer `N`) without changing the package version reported to the server. Never replace assets of an already published release.
 
-```
-git commit -am "Fork: sync to launcher <version>"
-git tag v<version>
-git push origin main --tags
-```
+Run CI and a manual verification build on the exact candidate commit before publishing or moving a public release tag. Verify that the artifact source SHA is the intended commit, the installer exists, and its checksum matches the published manifest. Only then publish the verified installer. A failed workflow does not constitute a release.
 
-The workflow at `.github/workflows/release.yml` runs on the tag:
-- rebuilds natives (Zig 0.15.2), deathcomm (.NET 10), diagnostics helper,
-- validates the pinned DLL hashes (fork values, not upstream),
-- packages an NSIS installer,
-- generates `SHA256SUMS.txt` and `latest.yml`,
-- creates a **draft** GitHub release with everything attached.
+Do not force-push main or reset unrelated work to recover from a failed build. Preserve user changes. Repair the candidate and rerun only when the changed condition makes the retry informative.
 
-Open <https://github.com/sinnafuls/rotk-nulled/releases>, review the draft,
-publish it.
+## Private and generated files
 
-## Emergency rollback
-
-If a release is bad, the previous installer is still on the previous release.
-Users who already installed the bad one can reinstall the old `.exe`; NSIS
-per-user replaces cleanly.
-
-If you need to revert the fork itself:
-```
-git reset --hard <previous good SHA>
-git push --force-with-lease origin main
-```
-
-## What NEVER goes in the repo
-
-- `release/` (built by CI; already `.gitignore`d)
-- `%APPDATA%\ROTK Launcher\player-keys.v2.json` (your account key)
-- `%APPDATA%\ROTK Launcher\machine.v1.json` (per-launch synthetic identity)
-- Any H1Z1 game file
+Do not version game installations, user account keys, local identities, logs, captured traffic, build caches, or generated `release/` output. GitHub Actions publishes verified release artifacts separately from source.

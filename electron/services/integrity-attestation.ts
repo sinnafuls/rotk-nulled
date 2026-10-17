@@ -53,8 +53,9 @@ export interface AttestationChallenge {
   keyId: string;
   signature: string;
   /**
-   * The fingerprint slots this launch is asked for (#320 §B), covered by the
-   * signature. Absent from a server that names none: then the core five.
+   * The fingerprint slots the server asks for (#320 §B), covered by the
+   * signature and validated so the challenge verifies. This launcher answers
+   * none of them; the server decides what an unanswered request means.
    */
   hwidSlots?: string[];
   /**
@@ -87,17 +88,8 @@ export interface AttestationResult {
   evidence: string;
   claim: AttestationClaim;
   deviations: ObservedDeviation[];
-  /**
-   * Optional TPM proof over the challenge nonce (see tpm-identity.ts). Rides in
-   * the attestation block because that is what already carries the challengeId
-   * the server needs to bind it; absent when the machine has no usable TPM.
-   */
-  tpmProof?: { publicKey: string; signature: string; algo: string };
-  /**
-   * Optional level-2 anchor (see tpm-anchor.ts): the TPM identity key's proof
-   * over the same message, with the TPM2B_PUBLIC that names it.
-   */
-  tpmAnchor?: { publicKey: string; signature: string; algo: string; tpmPublic: string };
+  // No TPM proof or anchor: this launcher creates no hardware-backed identity
+  // evidence. The server decides whether an attestation without it is admitted.
 }
 
 interface CacheEntry {
@@ -476,8 +468,6 @@ export function buildAttestationResult(
   challenge: AttestationChallenge,
   measurement: Measurement,
   launcherVersion: string,
-  tpmProof?: { publicKey: string; signature: string; algo: string } | null,
-  tpmAnchor?: { publicKey: string; signature: string; algo: string; tpmPublic: string } | null,
 ): AttestationResult {
   return {
     challengeId: challenge.challengeId,
@@ -491,8 +481,6 @@ export function buildAttestationResult(
       totalBytes: measurement.totalBytes,
     },
     deviations: measurement.deviations,
-    ...(tpmProof ? { tpmProof } : {}),
-    ...(tpmAnchor ? { tpmAnchor } : {}),
   };
 }
 

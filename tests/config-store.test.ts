@@ -161,14 +161,17 @@ describe("ConfigStore", () => {
     expect((await new ConfigStore(directory).load()).debugSessionEnabled).toBe(false);
   });
 
-  it("keeps the anticheat testing toggle off by default and persists it", async () => {
+  it("drops the retired anticheat toggle from an older config instead of honouring it", async () => {
     const directory = await temporaryDirectory();
-    const store = new ConfigStore(directory);
-    expect((await store.load()).loadAnticheatModule).toBeUndefined();
-    await store.save({ schemaVersion: 1, loadAnticheatModule: true });
-    expect((await new ConfigStore(directory).load()).loadAnticheatModule).toBe(true);
-    await store.save({ schemaVersion: 1, loadAnticheatModule: false });
-    expect((await new ConfigStore(directory).load()).loadAnticheatModule).toBe(false);
+    await writeFile(join(directory, "config.v1.json"), JSON.stringify({
+      schemaVersion: 1,
+      installation,
+      loadAnticheatModule: false,
+    }), "utf8");
+
+    const loaded = await new ConfigStore(directory).load();
+    expect(loaded.installation).toEqual(installation);
+    expect(loaded).not.toHaveProperty("loadAnticheatModule");
   });
 
   it("falls back to a fresh state rather than trusting an unknown server", async () => {

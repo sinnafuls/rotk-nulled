@@ -23,8 +23,6 @@ interface InstallPanelProps {
   debugSessionFailed: boolean;
   debugSessionLocked: boolean;
   onToggleDebugSession(enabled: boolean): void;
-  /** LOCAL EDIT (fork): testing toggle - stage ROTK's rotkc.dll for the game. */
-  onToggleAnticheat(enabled: boolean): void;
 }
 
 function shortPath(value: string | null, emptyLabel: string): string {
@@ -56,7 +54,6 @@ export function InstallPanel({
   debugSessionFailed,
   debugSessionLocked,
   onToggleDebugSession,
-  onToggleAnticheat,
 }: InstallPanelProps) {
   const { copy } = useI18n();
   const hasSource = Boolean(snapshot.selection.sourceRoot);
@@ -278,21 +275,6 @@ export function InstallPanel({
                   {debugFailure && <><br />{debugCopy.failure[debugFailure.reason]}{debugFailure.httpStatus ? ` (HTTP ${debugFailure.httpStatus})` : ""}</>}
                 </p>
               )}
-            </section>
-
-            <section className="anticheat-settings" aria-labelledby="anticheat-title">
-              <h3 id="anticheat-title">{copy.anticheat.title}</h3>
-              <label className="anticheat-settings__toggle">
-                <input
-                  type="checkbox"
-                  checked={snapshot.anticheatEnabled}
-                  disabled={busy}
-                  aria-describedby="anticheat-description"
-                  onChange={(event) => onToggleAnticheat(event.target.checked)}
-                />
-                <span>{copy.anticheat.enable}</span>
-              </label>
-              <p id="anticheat-description">{copy.anticheat.description}</p>
             </section>
 
             {snapshot.installationRoot && !installing && (
