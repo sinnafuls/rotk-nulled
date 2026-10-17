@@ -718,6 +718,7 @@ async function snapshot(): Promise<LauncherSnapshot> {
       ? MAIN_COPY[currentLocale].inputProfile[inputProfileRecovery.restored ? "restored" : "reset"](inputProfileRecovery.damagedCopy)
       : null,
     gamePid,
+    anticheatEnabled,
     updateRequired: updateRequired || launcherUpdateBlocksPlay(launcherUpdate.state),
     canPlay:
       phase === "ready"
