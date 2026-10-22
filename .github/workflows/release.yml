@@ -192,17 +192,24 @@ jobs:
           $helperSourceHash = (Get-FileHash -LiteralPath "resources\diagnostics\ROTK.Diagnostics.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($helperPackagedHash -ne $helperSourceHash) { throw "Packaged diagnostic helper differs from the verified source build." }
 
+          # Launcher-supplied artifacts: compare the packaged copy against the
+          # repository artifact that the build-time checks above already pinned.
+          # This keeps a single source of truth, so an upstream hash merge can
+          # never leave this second assertion stale.
           $proxyHash = (Get-FileHash -LiteralPath $vivoxProxy.FullName -Algorithm SHA256).Hash
-          if ($proxyHash -ne "566C0940F7BA62A1DCCAFB8482F39F151BF052E00C97BB8C737E77487879ACD0") {
-            throw "Unexpected packaged Vivox proxy SHA-256: $proxyHash"
+          $proxySourceHash = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
+          if ($proxyHash -ne $proxySourceHash) {
+            throw "Packaged Vivox proxy differs from the verified source artifact."
           }
           $gameplayHash = (Get-FileHash -LiteralPath $gameplay.FullName -Algorithm SHA256).Hash
-          if ($gameplayHash -ne "FFE3456B095832BB2DD2C97893E074FE07B34AF6DD8AFB1B410BB9110CA387E0") {
-            throw "Unexpected packaged shotgun sprint proxy SHA-256: $gameplayHash"
+          $gameplaySourceHash = (Get-FileHash -LiteralPath "resources\patches\dinput8.dll" -Algorithm SHA256).Hash
+          if ($gameplayHash -ne $gameplaySourceHash) {
+            throw "Packaged shotgun sprint proxy differs from the verified source artifact."
           }
           $rotkcHash = (Get-FileHash -LiteralPath $rotkc.FullName -Algorithm SHA256).Hash
-          if ($rotkcHash -ne "4765861DC893A103F531874E18970EA5B99755D0E5EAFA60F710AABA0067A6ED") {
-            throw "Unexpected packaged rotkc.dll SHA-256: $rotkcHash"
+          $rotkcSourceHash = (Get-FileHash -LiteralPath "resources\patches\rotkc.dll" -Algorithm SHA256).Hash
+          if ($rotkcHash -ne $rotkcSourceHash) {
+            throw "Packaged rotkc.dll differs from the verified source artifact."
           }
 
           $vivoxHash = (Get-FileHash -LiteralPath $vivoxRuntime.FullName -Algorithm SHA256).Hash
