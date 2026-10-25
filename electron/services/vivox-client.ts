@@ -10,7 +10,7 @@ export const VIVOX_STOCK_V4_SHA256 =
 export const VIVOX_STOCK_V5_SHA256 =
   "33a7f704eda23dda9ccbd9eba1fda2f0589211e9c61ec9d1f9c797acc624ea44";
 export const VIVOX_PROXY_SHA256 =
-  "566c0940f7ba62a1dccafb8482f39f151bf052e00c97bb8c737e77487879acd0";
+  "ea931a16eee649758b3a5341c3867bbf5777810d3d72c44d7d93d4725fbb482e";
 export const CROUCH_PARITY_MARKER_NAME = "rotk-crouch-parity.ini";
 
 const CROUCH_CLIENT_BUILD_ID = "h1z1-1.0.326.439939";

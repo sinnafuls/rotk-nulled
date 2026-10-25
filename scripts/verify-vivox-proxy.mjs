@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 // Bundled voice reliability and pickup crouch proxy, pinned byte for byte.
-const expected = "566c0940f7ba62a1dccafb8482f39f151bf052e00c97bb8c737e77487879acd0";
+const expected = "ea931a16eee649758b3a5341c3867bbf5777810d3d72c44d7d93d4725fbb482e";
 const proxyPath = resolve(process.argv[2] ?? "resources/patches/vivoxsdk_x64.dll");
 const [binary, sidecar] = await Promise.all([
   readFile(proxyPath),

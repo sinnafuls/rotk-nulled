@@ -130,13 +130,13 @@ jobs:
           npm run build:vivox
           if ($LASTEXITCODE -ne 0) { throw "Vivox release input validation failed." }
           $proxyHash = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
-          if ($proxyHash -ne "566C0940F7BA62A1DCCAFB8482F39F151BF052E00C97BB8C737E77487879ACD0") {
+          if ($proxyHash -ne "EA931A16EEE649758B3A5341C3867BBF5777810D3D72C44D7D93D4725FBB482E") {
             throw "Unexpected Vivox proxy SHA-256: $proxyHash"
           }
           npm run prepare:gameplay-patch
           if ($LASTEXITCODE -ne 0) { throw "Gameplay patch build or tests failed." }
           $gameplayHash = (Get-FileHash -LiteralPath "resources\patches\dinput8.dll" -Algorithm SHA256).Hash
-          if ($gameplayHash -ne "3D2319E6AC4F598FFE90C9389129E56D4E892896276B639D2D1EEB9B16D6DC6A") {
+          if ($gameplayHash -ne "F3A66A96F5DDCD7018098948E46B34BA64EECC68D7A12C6FC8D8654055126A74") {
             throw "Unexpected shotgun sprint proxy SHA-256: $gameplayHash"
           }
           # Upstream 2.0.40 supplied anticheat module (docs/RELEASE_2_0_40.md).
