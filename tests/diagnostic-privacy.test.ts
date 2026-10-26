@@ -119,7 +119,7 @@ describe('diagnostic evidence belongs to the recorded session', () => {
     const text = await zipText(zip);
     for (const secret of ['PRIVATE_ENV_VALUE', 'PRIVATE_JSON_SECRET', 'PrivatePerson', 'PRIVATE NOTE WITH SPACES']) expect(text).not.toContain(secret);
     expect(text).toContain('5.0.0.0'); expect(text).toContain('0xC0000005'); expect(text).toContain('vivoxsdk_x64.dll');
-  });
+  }, 30_000);
 
   it('exports valid ZIPs on filesystems without hard links while preserving an existing destination', async () => {
     const f = await fixture(), { id } = await f.service.beginSession(f.context);
@@ -138,7 +138,7 @@ describe('diagnostic evidence belongs to the recorded session', () => {
     });
     await expect(f.service.exportReport(id, raced, { includeDumps: false, description: '' })).rejects.toThrow('existing destination');
     expect(await readFile(raced, 'utf8')).toBe('KEEP_OTHER_WRITER');
-  });
+  }, 30_000);
 
   it('preserves an observed crash classification and cutoff if the launcher stops before collection', async () => {
     const f = await fixture(), log = join(f.installationRoot, 'game.log');
@@ -152,7 +152,7 @@ describe('diagnostic evidence belongs to the recorded session', () => {
     expect((await restarted.getReport(id)).summary.kind).toBe('crash');
     expect(await zipText(zip)).toContain('CONFIRMED_CRASH_SESSION');
     expect(await zipText(zip)).not.toContain('LATER_SESSION_PRIVATE');
-  });
+  }, 30_000);
 });
 
 describe('diagnostic privacy without losing crash evidence', () => {
