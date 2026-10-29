@@ -27,6 +27,7 @@ import {
 } from "./gameplay-patch.js";
 import { assertVivoxCompatibility, deployVivoxCompatibility } from "./vivox-client.js";
 import { assertSteamShim, deploySteamShim } from "./steam-shim.js";
+import { deployPlayerFonts } from "./player-fonts.js";
 import { prepareInterfaceInputProfile } from "./interface-input-profile.js";
 import { recoverInputProfile, type InputProfileRecovery } from "./input-profile-recovery.js";
 import { prepareWeaponStanceProfile, WEAPON_STANCE_ENABLED } from "./weapon-stance-profile.js";
@@ -89,6 +90,8 @@ export interface LaunchRequest {
   bundledGameplayPatchPath: string;
   /** Pinned upstream rotkc.dll, staged into the game root before every launch. */
   bundledRotkcPath: string;
+  /** resources/fonts: the fonts a player may pick in game (player-fonts.ts). */
+  bundledFontsPath: string;
   /**
    * Mode reapplied when the server does not run attestation (development or
    * unconfigured backend). The production path always uses the signed
@@ -465,6 +468,8 @@ export class GameLauncher {
     // launcher update must land before it measures; otherwise the first
     // launch after that update reports a mismatch for every honest player.
     await deploySteamShim(installationRoot, request.bundledShimPath);
+    // Fonts the player picked in game; the game reads them only as it starts.
+    await deployPlayerFonts(installationRoot, request.bundledFontsPath, request.config.playerFont);
 
     // Integrity attestation runs before the ticket exists: the whole point is
     // that a tampered installation never obtains one.

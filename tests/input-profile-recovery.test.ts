@@ -220,7 +220,7 @@ describe("client preparation", () => {
       runtime: RUNTIME_CONFIGS.test, locale: "en", logsRoot: f.logsRoot,
       bundledShimPath: join(f.root, "bundled-shim.dll"), bundledVivoxProxyPath: join(f.root, "unused-proxy.dll"),
       bundledVivoxRuntimePath: join(f.root, "unused-runtime.dll"), bundledGameplayPatchPath: join(f.root, "unused-dinput8.dll"),
-      bundledRotkcPath: fileURLToPath(new URL("../resources/patches/rotkc.dll", import.meta.url)), clientPatchModeFallback: "clean",
+      bundledRotkcPath: fileURLToPath(new URL("../resources/patches/rotkc.dll", import.meta.url)), bundledFontsPath: join(f.root, "unused-fonts"), clientPatchModeFallback: "clean",
       onInputProfileRecovered, onExit: vi.fn(),
     };
     const identity = { ticket: "test-only-ticket", displayName: "FixturePlayer", steamId: "76561190000000000" } as LaunchTicketIdentity;

@@ -30,6 +30,8 @@ import {
   type LauncherSnapshot,
   type OperationResult,
   type PlayerIdentitySummary,
+  type PlayerFontOption,
+  type PlayerFontPreview,
 } from "../shared/contracts.js";
 import { isAppLocale, type AppLocale } from "../shared/locale.js";
 import {
@@ -54,6 +56,7 @@ import {
   resolveBundledGameplayPatchPath,
   resolveBundledRotkcPath,
   resolveBundledDiagnosticsPath,
+  resolveBundledFontsPath,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
 import { DiscordPresence } from "./services/discord-presence.js";
@@ -83,6 +86,7 @@ import {
 } from "./services/server-status.js";
 import { UpdateFeedService } from "./services/update-feed.js";
 import { AssetSyncService, assetSyncInternals } from "./services/asset-sync.js";
+import { DEFAULT_PLAYER_FONT, playerFont, playerFontPreview, readPlayerFontManifest } from "./services/player-fonts.js";
 import { LauncherUpdateService } from "./services/launcher-update.js";
 import { launcherUpdateBlocksPlay } from "../shared/launcher-update.js";
 import electronUpdater from "electron-updater";
@@ -211,6 +215,9 @@ let serverStatus: Partial<Record<ServerId, ServerStatus>> = {};
 let quitWhenGameExits = false;
 let crashReportRequests = 0;
 let assetSyncEnabled = true;
+let playerFontOptions: PlayerFontOption[] = [];
+let selectedPlayerFont = DEFAULT_PLAYER_FONT;
+let selectedLauncherFont = DEFAULT_PLAYER_FONT;
 let assetSyncRunning = false;
 let assetSyncStatus: AssetSyncStatus = "idle";
 let assetSyncWarning: AssetSyncWarning | null = null;
@@ -703,6 +710,7 @@ async function snapshot(): Promise<LauncherSnapshot> {
     playerIdentity: identitySummary(),
     launcherUpdate: launcherUpdate.state,
     assetSync: assetSyncSummary(),
+    playerFont: { selected: selectedPlayerFont, launcherSelected: selectedLauncherFont, options: playerFontOptions },
     debugSession: diagnostics?.debugState() ?? { enabled: false, status: "idle", fileName: null, error: null },
     integrityCheck: attestationProgress
       ? {
@@ -1297,6 +1305,7 @@ function registerIpc(): void {
           bundledVivoxRuntimePath: resolveBundledVivoxRuntimePath(),
           bundledGameplayPatchPath: resolveBundledGameplayPatchPath(),
           bundledRotkcPath: resolveBundledRotkcPath(),
+          bundledFontsPath: resolveBundledFontsPath(),
           clientPatchModeFallback:
             await readCachedGameplayPatchMode(join(app.getPath("userData"))) ?? "patched",
           attest: () => attestInstallation(launchCredential.playerKey, launchRuntime),
@@ -1431,6 +1440,36 @@ function registerIpc(): void {
         await broadcastSnapshot();
         return result;
       }
+    }),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.setPlayerFont,
+    trustedHandler(async (_event, id: unknown): Promise<OperationResult> => {
+      if (typeof id !== "string" || !playerFontOptions.some((font) => font.id === id)) throw new Error("Unsupported player font");
+      await configStore.setPlayerFont(id);
+      selectedPlayerFont = id;
+      await broadcastSnapshot();
+      return { ok: true };
+    }),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.setLauncherFont,
+    trustedHandler(async (_event, id: unknown): Promise<OperationResult> => {
+      if (typeof id !== "string" || !playerFontOptions.some((font) => font.id === id)) throw new Error("Unsupported player font");
+      await configStore.setLauncherFont(id);
+      selectedLauncherFont = id;
+      await broadcastSnapshot();
+      return { ok: true };
+    }),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.getPlayerFontPreview,
+    trustedHandler(async (_event, id: unknown): Promise<OperationResult<PlayerFontPreview>> => {
+      if (typeof id !== "string" || !playerFontOptions.some((font) => font.id === id)) throw new Error("Unsupported player font");
+      return { ok: true, value: await playerFontPreview(resolveBundledFontsPath(), id) };
     }),
   );
 
@@ -1584,6 +1623,11 @@ async function initialize(): Promise<void> {
   assetSyncEnabled = config.assetSyncEnabled ?? true;
   selectedServerId = config.serverId ?? DEFAULT_SERVER_ID;
   selectedRole = config.role ?? DEFAULT_PLAYER_ROLE;
+  // A missing font bundle only hides the font choice; Play keeps the fonts as they are.
+  const fontManifest = await readPlayerFontManifest(resolveBundledFontsPath()).catch(() => null);
+  playerFontOptions = fontManifest?.fonts.map(({ id, name, cyrillic }) => ({ id, name, cyrillic })) ?? [];
+  selectedPlayerFont = fontManifest ? playerFont(fontManifest, config.playerFont).id : DEFAULT_PLAYER_FONT;
+  selectedLauncherFont = fontManifest ? playerFont(fontManifest, config.launcherFont).id : DEFAULT_PLAYER_FONT;
   const assetState = await assetSync.readState().catch(() => null);
   assetSyncPackVersion = assetState?.packVersion ?? null;
   assetSyncLastAt = assetState?.syncedAt ?? null;
