@@ -24,3 +24,6 @@ resources/patches/vivoxsdk_x64_proxy.lib
 
 # Local agent workspace (uploads, scratch)
 .nyx/
+
+# Restored from rotkc.dll.br by npm run prepare:rotkc
+resources/patches/rotkc.dll

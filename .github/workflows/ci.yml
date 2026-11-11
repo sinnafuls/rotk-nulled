@@ -53,6 +53,11 @@ jobs:
         shell: pwsh
         run: '"ZIG_LOCAL_CACHE_DIR=$env:RUNNER_TEMP\zig-local-cache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
 
+      - name: Restaurer le module rotkc fourni
+        # Le dépôt le conserve compressé (limite GitHub de 100 Mo par fichier) ;
+        # le script échoue si le fichier restauré n'a pas l'empreinte attendue.
+        run: npm run prepare:rotkc
+
       - name: Refuser les fichiers propriétaires du client
         shell: pwsh
         run: |
@@ -99,7 +104,7 @@ jobs:
           }
 
           $gameplayHash = (Get-FileHash -LiteralPath $allowedGameplayDll -Algorithm SHA256).Hash
-          if ($gameplayHash -ne "F6611F3AB31AA28ECA251B54402CA9927EFEA090B94706D3E41E5C458C9B8CAA") {
+          if ($gameplayHash -ne "701A216CF896254FA3D26CFBECBF158C6FA7E7FE2C753ECE1132B6C4C88BAC31") {
             throw "Unexpected shotgun sprint proxy SHA-256: $gameplayHash"
           }
           $gameplaySidecar = ((Get-Content -LiteralPath "$allowedGameplayDll.sha256" -Raw) -split "\s+")[0]
@@ -108,8 +113,9 @@ jobs:
           }
 
           $rotkcHash = (Get-FileHash -LiteralPath $allowedRotkcDll -Algorithm SHA256).Hash
-          if ($rotkcHash -ne "4765861DC893A103F531874E18970EA5B99755D0E5EAFA60F710AABA0067A6ED") {
-            throw "Unexpected rotkc.dll SHA-256 (expected the upstream 2.0.40 supplied module): $rotkcHash"
+          $rotkcSidecar = ((Get-Content -LiteralPath "$allowedRotkcDll.sha256" -Raw) -split "\s+")[0]
+          if ($rotkcSidecar -ne $rotkcHash.ToLowerInvariant()) {
+            throw "Le sidecar rotkc.dll.sha256 ne correspond pas au DLL : $rotkcSidecar"
           }
 
           $vivoxHash = (Get-FileHash -LiteralPath $allowedVivoxDll -Algorithm SHA256).Hash
@@ -223,7 +229,7 @@ jobs:
           & powershell -NoProfile -ExecutionPolicy Bypass -File native/vivoxproxy/build-v5-compat.ps1 -OutputPath $alternateProxy
           if ($LASTEXITCODE -ne 0) { throw "Second reference Vivox build failed." }
           $alternateHash = (Get-FileHash -LiteralPath $alternateProxy -Algorithm SHA256).Hash
-          if ($hash -ne $alternateHash -or $hash -ne "EA931A16EEE649758B3A5341C3867BBF5777810D3D72C44D7D93D4725FBB482E") {
+          if ($hash -ne $alternateHash -or $hash -ne "2F606C7872B96482B91ED8292F52D9DFC7F0EA7AF0EE8D98F3169B87C9203B88") {
             throw "The reference Vivox source build changed: $hash / $alternateHash"
           }
           $bundledHash = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash

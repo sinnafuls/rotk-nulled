@@ -96,6 +96,12 @@ jobs:
         if: steps.reuse.outputs.reused != 'true'
         run: npm ci
 
+      - name: Restore the supplied rotkc module
+        if: steps.reuse.outputs.reused != 'true'
+        # Stored compressed (GitHub's 100 MB limit per file); the script fails
+        # unless the restored file has the expected SHA-256.
+        run: npm run prepare:rotkc
+
       - name: Verify the bundled official Vivox 5 runtime
         if: steps.reuse.outputs.reused != 'true'
         run: npm run verify:vivox-runtime
@@ -130,18 +136,19 @@ jobs:
           npm run build:vivox
           if ($LASTEXITCODE -ne 0) { throw "Vivox release input validation failed." }
           $proxyHash = (Get-FileHash -LiteralPath "resources\patches\vivoxsdk_x64.dll" -Algorithm SHA256).Hash
-          if ($proxyHash -ne "EA931A16EEE649758B3A5341C3867BBF5777810D3D72C44D7D93D4725FBB482E") {
+          if ($proxyHash -ne "2F606C7872B96482B91ED8292F52D9DFC7F0EA7AF0EE8D98F3169B87C9203B88") {
             throw "Unexpected Vivox proxy SHA-256: $proxyHash"
           }
           npm run prepare:gameplay-patch
           if ($LASTEXITCODE -ne 0) { throw "Gameplay patch build or tests failed." }
           $gameplayHash = (Get-FileHash -LiteralPath "resources\patches\dinput8.dll" -Algorithm SHA256).Hash
-          if ($gameplayHash -ne "F6611F3AB31AA28ECA251B54402CA9927EFEA090B94706D3E41E5C458C9B8CAA") {
+          if ($gameplayHash -ne "701A216CF896254FA3D26CFBECBF158C6FA7E7FE2C753ECE1132B6C4C88BAC31") {
             throw "Unexpected shotgun sprint proxy SHA-256: $gameplayHash"
           }
-          # Upstream 2.0.40 supplied anticheat module (docs/RELEASE_2_0_40.md).
+          # Upstream supplies this module; its sidecar is the source of truth.
           $rotkcHash = (Get-FileHash -LiteralPath "resources\patches\rotkc.dll" -Algorithm SHA256).Hash
-          if ($rotkcHash -ne "4765861DC893A103F531874E18970EA5B99755D0E5EAFA60F710AABA0067A6ED") {
+          $rotkcSourceSidecar = ((Get-Content -LiteralPath "resources\patches\rotkc.dll.sha256" -Raw) -split "\s+")[0]
+          if ($rotkcHash -ne $rotkcSourceSidecar.ToUpperInvariant()) {
             throw "Unexpected rotkc.dll SHA-256: $rotkcHash"
           }
           # The sidecars feed the embedded attestation overrides: a mismatch
@@ -180,6 +187,11 @@ jobs:
           $gameplay = Get-Item -LiteralPath "$unpacked\resources\patches\dinput8.dll"
           $rotkc = Get-Item -LiteralPath "$unpacked\resources\patches\rotkc.dll"
           $helper = Get-Item -LiteralPath "$unpacked\resources\diagnostics\ROTK.Diagnostics.exe"
+
+          # The installer must carry the supplied rotkc module unchanged.
+          $rotkcPackagedHash = (Get-FileHash -LiteralPath $rotkc.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $rotkcSidecar = ((Get-Content -LiteralPath "resources\patches\rotkc.dll.sha256" -Raw) -split "\s+")[0]
+          if ($rotkcSidecar -ne $rotkcPackagedHash) { throw "Packaged rotkc.dll differs from the supplied module: $rotkcPackagedHash" }
 
           $helperPackagedHash = (Get-FileHash -LiteralPath $helper.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $helperPackagedSidecar = ((Get-Content -LiteralPath "$($helper.FullName).sha256" -Raw) -split "\s+")[0]

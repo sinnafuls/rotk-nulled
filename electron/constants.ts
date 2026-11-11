@@ -61,7 +61,7 @@ export function resolveBundledFontsPath(): string {
 }
 
 // The anticheat module the Vivox proxy loads; staged before every launch
-// (see services/anticheat-module.ts).
+// (see services/game-launcher.ts).
 export function resolveBundledRotkcPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "patches", "rotkc.dll")

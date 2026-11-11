@@ -10,7 +10,7 @@ export const VIVOX_STOCK_V4_SHA256 =
 export const VIVOX_STOCK_V5_SHA256 =
   "33a7f704eda23dda9ccbd9eba1fda2f0589211e9c61ec9d1f9c797acc624ea44";
 export const VIVOX_PROXY_SHA256 =
-  "ea931a16eee649758b3a5341c3867bbf5777810d3d72c44d7d93d4725fbb482e";
+  "2f606c7872b96482b91ed8292f52d9dfc7f0ea7af0ee8d98f3169b87c9203b88";
 export const CROUCH_PARITY_MARKER_NAME = "rotk-crouch-parity.ini";
 
 const CROUCH_CLIENT_BUILD_ID = "h1z1-1.0.326.439939";
@@ -131,8 +131,16 @@ async function deployVivoxCompatibilityWithPolicy(
   const v5Path = join(root, "vivoxsdk_x64_v5.dll");
   const crouchMarkerPath = join(root, CROUCH_PARITY_MARKER_NAME);
 
-  const active = await stat(activePath).catch(() => null);
-  if (!active?.isFile()) {
+  // An antivirus can quarantine the active proxy. With a valid stock backup
+  // the proxy is simply copied back below, so only a missing file with no
+  // backup to fall back on is fatal. Only a file that is really gone counts:
+  // any other stat failure still stops here, as before.
+  let missing = false;
+  const active = await stat(activePath).catch((e: NodeJS.ErrnoException) => {
+    missing = e.code === "ENOENT";
+    return null;
+  });
+  if (!missing && !active?.isFile()) {
     throw new Error("Le SDK Vivox historique est introuvable.");
   }
 
@@ -145,6 +153,8 @@ async function deployVivoxCompatibilityWithPolicy(
       await atomicCopy(legacyBackupPath, backupPath);
     } else if (activeHash === policy.stockV4Sha256) {
       await atomicCopy(activePath, backupPath);
+    } else if (missing) {
+      throw new Error("Le SDK Vivox historique est introuvable.");
     } else {
       throw new Error("La sauvegarde du SDK Vivox historique est invalide.");
     }

@@ -188,6 +188,7 @@ export default function App() {
           setNetworkOpen(false);
           setIdentityOpen(true);
         }}
+        onStopGame={() => void perform(() => window.rotk.stopGame())}
         onSelectLaunchProfile={(serverId, role) =>
           void perform(() => window.rotk.setLaunchProfile(serverId, role))}
       />

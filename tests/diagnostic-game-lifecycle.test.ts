@@ -1,16 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GameLauncher, gameLauncherInternals, type GameLaunchDiagnostics, type LaunchRequest } from '../electron/services/game-launcher.js';
 import { localizeServiceError } from '../electron/i18n.js';
 import { RUNTIME_CONFIGS } from '../electron/services/runtime-config.js';
-import { ANTICHEAT_MODULE_BYTES, ANTICHEAT_MODULE_FILE_NAME } from '../electron/services/anticheat-module.js';
 import { fileURLToPath } from 'node:url';
 
 const pinnedAnticheatModule = fileURLToPath(new URL('../resources/patches/rotkc.dll', import.meta.url));
+const pinnedAnticheatModuleBytes = statSync(pinnedAnticheatModule).size;
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), gatewayClose: vi.fn(async () => undefined),
   deployVoice: vi.fn(async () => undefined), checkVoice: vi.fn(async () => undefined),
@@ -100,6 +101,19 @@ describe('game lifecycle remains independent of diagnostics', () => {
     await vi.waitFor(() => expect(f.request.onExit).toHaveBeenCalledOnce());
   });
 
+  it('stops only its own running game, and the exit event hands Play back', async () => {
+    const f = await fixture();
+    expect(f.launcher.stop()).toBe(false);
+    expect(await f.launcher.launch(f.request)).toBe(4242);
+    f.child().kill.mockReturnValue(true);
+    expect(f.launcher.stop()).toBe(true);
+    expect(f.child().kill).toHaveBeenCalledOnce();
+    f.child().exit(1);
+    await vi.waitFor(() => expect(f.request.onExit).toHaveBeenCalledWith(1));
+    expect(f.launcher.stop()).toBe(false);
+    expect(f.child().kill).toHaveBeenCalledOnce();
+  });
+
   it('never publishes presence for a startup crash and tolerates a broken presence hook', async () => {
     const f = await fixture();
     f.request.presence = { start: vi.fn(), stop: vi.fn(() => { throw new Error('Discord unavailable'); }) };
@@ -175,7 +189,7 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(userProfile).toContain('<Trigger>Shift+M</Trigger>');
     expect(userProfile).toContain('<Trigger>Shift+Tab</Trigger>');
     expect(await readFile(join(clientRoot, 'InputProfile_Default.xml'), 'utf8')).toBe(defaultProfile);
-    expect((await readFile(join(clientRoot, 'rotkc.dll'))).length).toBe(ANTICHEAT_MODULE_BYTES);
+    expect((await readFile(join(clientRoot, 'rotkc.dll'))).length).toBe(pinnedAnticheatModuleBytes);
     prepared.resolve();
     await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
     f.child().exit(0);
@@ -232,13 +246,13 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(f.child().kill).not.toHaveBeenCalled();
   });
 
-  it('stages the pinned anticheat module on every launch, replacing a stale copy', async () => {
+  it('stages the bundled anticheat module on every launch, replacing a stale copy', async () => {
     const f = await fixture();
-    expect(await readFile(join(f.request.config.installation!.root, ANTICHEAT_MODULE_FILE_NAME), 'utf8')).toBe('stale anticheat module');
+    expect(await readFile(join(f.request.config.installation!.root, 'rotkc.dll'), 'utf8')).toBe('stale anticheat module');
     const launched = f.launcher.launch(f.request).catch(error => error);
     await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
-    const staged = await readFile(join(f.request.config.installation!.root, ANTICHEAT_MODULE_FILE_NAME));
-    expect(staged.length).toBe(ANTICHEAT_MODULE_BYTES);
+    const staged = await readFile(join(f.request.config.installation!.root, 'rotkc.dll'));
+    expect(staged.length).toBe(pinnedAnticheatModuleBytes);
     expect(staged.subarray(0, 2).toString('ascii')).toBe('MZ');
     f.child().exit(0);
     await launched;

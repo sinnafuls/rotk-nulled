@@ -1,8 +1,10 @@
 # ROTK launcher privacy fork
 
-A Windows fork of [ROTK Launcher](https://github.com/MzKaxD/rotk-launcher), tracking upstream version 2.0.41. This is a community project, unaffiliated with Daybreak Game Company or the ROTK team.
+A Windows fork of [ROTK Launcher](https://github.com/MzKaxD/rotk-launcher), tracking upstream version 2.0.49. This is a community project, unaffiliated with Daybreak Game Company or the ROTK team.
 
 ## Privacy and admission
+
+- Debug and send session reports (Settings → Debug) is an explicit opt-in for one game: it turns itself off once that game's report is sent and stays on after a failed report.
 
 - The launcher never reads the real hardware. Every launch answers the HWID slots the server asks for from a synthetic identity — plausible serials plus a software key shaped like a TPM proof — so the ticket always carries serials while the real machine stays unreferenced. The identity rotates per Play click by default (`rotateEveryLaunch: false` in `machine.v1.json` keeps one stable machine).
 - Account authentication, game-file integrity verification, and server admission rules remain authoritative. A server refusal stays a refusal; this fork does not promise admission.
