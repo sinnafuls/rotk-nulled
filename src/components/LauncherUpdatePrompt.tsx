@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { ArrowRight, Download, X } from "lucide-react";
 import type { LauncherSnapshot } from "../../shared/contracts";
 import { hasLauncherUpdate } from "../../shared/launcher-update";
+import { gameSessionActive } from "../../shared/primary-action";
 import { useI18n } from "../i18n";
 
 interface LauncherUpdatePromptProps {
@@ -24,7 +25,7 @@ export function LauncherUpdatePrompt({
   const visible = open && (knownUpdate || snapshot.updateRequired);
   const downloading = update.status === "downloading";
   const downloaded = update.status === "downloaded";
-  const running = snapshot.gamePid !== null || snapshot.phase === "running" || snapshot.phase === "launching";
+  const running = gameSessionActive(snapshot);
 
   useEffect(() => {
     if (visible) dialog.current?.showModal();
@@ -54,14 +55,19 @@ export function LauncherUpdatePrompt({
       )}
       {update.status === "error" && <p className="launcher-update-prompt__error" role="alert">{copy.update.failed}: {update.error}</p>}
       {!knownUpdate && <p role="status">{copy.update.requiredDetail}</p>}
+      {(!knownUpdate || update.status === "error") && (
+        <button type="button" className="launcher-link" onClick={() => void window.rotk.openWebsite("/play")}>
+          {copy.update.manualDownload}
+        </button>
+      )}
       {downloaded && running && <p role="status">{copy.update.closeGame}</p>}
       <div className="launcher-update-prompt__actions">
-        <button type="button" className="launcher-update-prompt__primary" autoFocus
+        <button type="button" className="launcher-button launcher-button--big" autoFocus
           disabled={busy || downloading || update.status === "checking" || (downloaded && running)} onClick={downloaded ? onInstall : knownUpdate ? onDownload : onCheck}>
           <Download size={18} />
           {!knownUpdate ? copy.update.check : downloaded ? copy.update.restart : downloading ? copy.update.downloading : update.status === "error" ? copy.update.retry : copy.update.download}
         </button>
-        <button type="button" className="launcher-update-prompt__secondary" onClick={onClose}>
+        <button type="button" className="launcher-button launcher-button--ghost launcher-button--big" onClick={onClose}>
           {copy.update.later}
         </button>
       </div>

@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { access, copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants, existsSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { retryFs } from "./fs-safe.js";
 import { promisify } from "node:util";
@@ -46,6 +46,12 @@ const ANONYMOUS_LOGS_ROOT = join(
   "Temp",
   randomUUID().replaceAll("-", "").slice(0, 12),
 );
+// H1Z1 prints this line about 4 s after its spawn, right after its startup
+// settings. Some launches freeze before it, with no window and no further
+// output, and only a relaunch helps. Past this delay without the line, the
+// launch is reported as stalled; it is far above the slowest healthy start.
+export const GAME_STARTUP_MARKER = "Starting the game client";
+export const GAME_STARTUP_STALL_MS = 30_000;
 
 /**
  * What one attestation attempt produced.
@@ -125,6 +131,11 @@ export interface LaunchRequest {
   presence?: { start(pid: number): void; stop(): void };
   /** A damaged InputProfile_User.xml was set aside so the launch could go on. */
   onInputProfileRecovered?(recovery: InputProfileRecovery): void;
+  /**
+   * H1Z1 is still running but never printed GAME_STARTUP_MARKER within
+   * GAME_STARTUP_STALL_MS of its spawn. Called at most once per launch.
+   */
+  onStartupStalled?(): void;
   onExit(exitCode: number | null): void;
   /**
    * Called just before `onExit` when a launch that was reported as started
@@ -191,9 +202,9 @@ export async function validateInstalledClient(installation: InstalledClientConfi
 
   const executable = await stat(join(root, "H1Z1.exe")).catch(() => null);
   if (!executable?.isFile()) throw new Error("H1Z1.exe est introuvable dans l’installation ROTK.");
-  if (!existsSync(join(root, "steam_api64.original.dll"))) {
-    throw new Error("La sauvegarde de steam_api64.dll est absente. Réimporte le client.");
-  }
+  // steam_api64.original.dll is not required: the install keeps it as a
+  // courtesy copy of the vanilla file, nothing reads it back, and the active
+  // shim is redeployed at every launch. Its absence used to refuse the launch.
   return root;
 }
 
@@ -317,8 +328,10 @@ async function prepareClient(
   // Both steps below refuse a profile the game left truncated: recover it first.
   const recovery = await recoverInputProfile(root, inputProfileState);
   if (recovery) request.onInputProfileRecovered?.(recovery);
-  await prepareWeaponStanceProfile(root, inputProfileState, WEAPON_STANCE_ENABLED);
-  await prepareInterfaceInputProfile(root, inputProfileState);
+  await keepLockedInputProfile(root, async () => {
+    await prepareWeaponStanceProfile(root, inputProfileState, WEAPON_STANCE_ENABLED);
+    await prepareInterfaceInputProfile(root, inputProfileState);
+  });
 
   const configPath = join(root, "ClientConfig.ini");
   const configBackupPath = join(root, "ClientConfig.original.ini");
@@ -358,6 +371,25 @@ async function updateUserOptions(root: string, update: (options: string) => stri
     console.warn("UserOptions.ini was not updated; launching anyway.", error);
   } finally {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * The launcher only adds its own shortcuts to InputProfile_User.xml. When the
+ * file is read-only or held by another program, the game starts with the
+ * profile as it is, like UserOptions.ini above: the player keeps every binding
+ * and only misses those shortcuts. A damaged profile still stops the launch.
+ */
+async function keepLockedInputProfile(root: string, update: () => Promise<void>): Promise<void> {
+  const locked = (error: unknown): boolean => ["EPERM", "EACCES", "EBUSY"].includes((error as NodeJS.ErrnoException).code ?? "");
+  try {
+    // A read-only file is known at once; do not spend the rename retries on it.
+    await access(join(root, "InputProfile_User.xml"), fsConstants.W_OK)
+      .catch((error: unknown) => { if (locked(error)) throw error; });
+    await update();
+  } catch (error) {
+    if (!locked(error)) throw error;
+    console.warn("InputProfile_User.xml was not updated; launching anyway.", error);
   }
 }
 
@@ -522,9 +554,9 @@ export class GameLauncher {
 
     // Integrity attestation runs before the ticket exists: the whole point is
     // that a tampered installation never obtains one.
-    const outcome = request.attest
+    let outcome: AttestationOutcome = request.attest
       ? await request.attest()
-      : { status: "not-applicable", clientPatchMode: request.clientPatchModeFallback } as const;
+      : { status: "not-applicable", clientPatchMode: request.clientPatchModeFallback };
 
     // The durable website key reaches only the HTTPS account service. H1Z1
     // receives a short ticket and the Steam identity authenticated by it.
@@ -532,7 +564,17 @@ export class GameLauncher {
       request.identity.playerKey,
       request.runtime.launchTicketUrl,
       await ticketRequestOptions(request, outcome),
-    );
+    ).catch(async (error: unknown) => {
+      // A refused challenge (expired during a slow hash, policy changed
+      // meanwhile) is not a verdict on the files: attest once more.
+      if ((error as { code?: string } | null)?.code !== "attestation_retryable" || !request.attest) throw error;
+      outcome = await request.attest();
+      return createLaunchTicket(
+        request.identity.playerKey,
+        request.runtime.launchTicketUrl,
+        await ticketRequestOptions(request, outcome),
+      );
+    });
     let sessionGateway = await startLocalSessionGateway(launchIdentity.ticket);
     let measured: AttestationOutcome = outcome;
 
@@ -606,9 +648,33 @@ export class GameLauncher {
       this.child = child;
       const spawnedAt = performance.now();
       let started = false;
+      // Without the game's stdout there is no line to wait for, and a healthy
+      // game must never be taken for a frozen one: no pipe, no stall report.
+      const stallTimer = child.stdout ? setTimeout(() => {
+        if (child.exitCode !== null) return;
+        try { request.onStartupStalled?.(); } catch { /* The hook must not break the launch. */ }
+      }, GAME_STARTUP_STALL_MS) : undefined;
+      stallTimer?.unref?.();
+      // The marker may arrive split across two chunks: keep a short tail.
+      let startupTail = "";
+      let startupSeen = false;
+      const watchStartup = (text: string): void => {
+        if (startupSeen) return;
+        const seen = startupTail + text;
+        if (!seen.includes(GAME_STARTUP_MARKER)) {
+          startupTail = seen.slice(-GAME_STARTUP_MARKER.length);
+          return;
+        }
+        startupSeen = true;
+        startupTail = "";
+        clearTimeout(stallTimer);
+      };
       for (const stream of ["stdout", "stderr"] as const) {
         child[stream]?.setEncoding("utf8");
-        child[stream]?.on("data", (text: string) => diagnosticCallback(() => request.diagnostics?.onOutput(stream, text)));
+        child[stream]?.on("data", (text: string) => {
+          if (stream === "stdout") watchStartup(text);
+          diagnosticCallback(() => request.diagnostics?.onOutput(stream, text));
+        });
         child[stream]?.on("error", () => undefined);
       }
       diagnosticCallback(() => request.diagnostics?.onSpawned(child.pid!));
@@ -616,6 +682,7 @@ export class GameLauncher {
       const finalize = (code: number | null, signal: NodeJS.Signals | null = null): void => {
         if (finalized) return;
         finalized = true;
+        clearTimeout(stallTimer);
         // A startup failure is already reported by the rejected launch below.
         const earlyExit = started ? earlyExitMessage(code, performance.now() - spawnedAt) : null;
         try { request.presence?.stop(); } catch { /* Presence is optional. */ }

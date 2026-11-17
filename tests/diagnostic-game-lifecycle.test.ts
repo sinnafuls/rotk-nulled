@@ -5,7 +5,7 @@ import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GameLauncher, gameLauncherInternals, type GameLaunchDiagnostics, type LaunchRequest } from '../electron/services/game-launcher.js';
+import { GAME_STARTUP_MARKER, GAME_STARTUP_STALL_MS, GameLauncher, gameLauncherInternals, type GameLaunchDiagnostics, type LaunchRequest } from '../electron/services/game-launcher.js';
 import { localizeServiceError } from '../electron/i18n.js';
 import { RUNTIME_CONFIGS } from '../electron/services/runtime-config.js';
 import { fileURLToPath } from 'node:url';
@@ -58,7 +58,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.useRealTimers();
-  for (const child of children.splice(0)) { child.stdout.destroy(); child.stderr.destroy(); }
+  for (const child of children.splice(0)) { child.stdout?.destroy(); child.stderr.destroy(); }
   for (const root of roots.splice(0)) {
     if (!resolve(root).startsWith(resolve(join(tmpdir(), 'rotk-game-lifecycle-test-')))) throw new Error('Unsafe test cleanup');
     await rm(root, { recursive: true, force: true });
@@ -135,6 +135,19 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(f.request.attest).not.toHaveBeenCalled();
     expect(mocks.spawn).not.toHaveBeenCalled();
   });
+  it.runIf(process.platform === 'win32')('launches when a read-only InputProfile_User.xml cannot take the shortcuts', async () => {
+    const f = await fixture();
+    const profile = join(f.request.config.installation!.root, 'InputProfile_User.xml');
+    const locked = '<Profile name="User"><ActionSet name="Generic"><Action name="OpenMap"><Trigger>M</Trigger></Action></ActionSet></Profile>';
+    await writeFile(profile, locked);
+    await chmod(profile, 0o444);
+    const launched = f.launcher.launch(f.request).catch(error => error);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    expect(await readFile(profile, 'utf8')).toBe(locked);
+    await chmod(profile, 0o666);
+    f.child().exit(0);
+    await launched;
+  });
   it.runIf(process.platform === 'win32')('launches when UserOptions.ini cannot be rewritten', async () => {
     const f = await fixture();
     const options = join(f.request.config.installation!.root, 'UserOptions.ini');
@@ -159,6 +172,14 @@ describe('game lifecycle remains independent of diagnostics', () => {
     expect(mocks.deployVoice).toHaveBeenCalledOnce();
     expect(mocks.checkVoice).toHaveBeenCalledOnce();
     expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+  it('launches without the vanilla steam_api64.dll backup, which nothing reads back', async () => {
+    const f = await fixture();
+    await rm(join(f.request.config.installation!.root, 'steam_api64.original.dll'));
+    const launched = f.launcher.launch(f.request).catch(error => error);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    f.child().exit(0);
+    await launched;
   });
   it('deploys the bundled Steam shim before attestation and refuses drift before spawn', async () => {
     const f = await fixture();
@@ -301,6 +322,35 @@ describe('game lifecycle remains independent of diagnostics', () => {
   });
 });
 
+describe('the H1Z1 process the launcher starts', () => {
+  it('runs from the game folder, detached, with its output piped and the ticket identity in its environment', async () => {
+    process.env.H1Z1_LEFTOVER = 'from another launcher';
+    process.env.STEAMAPPID = '433850';
+    try {
+      const f = await fixture();
+      const launched = f.launcher.launch(f.request).catch(error => error);
+      await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+      const [executable, , options] = mocks.spawn.mock.calls[0];
+      const root = f.request.config.installation!.root;
+      expect(executable).toBe(join(root, 'H1Z1.exe'));
+      // rotkc.dll and the proxies are loaded by name from this folder, and the
+      // launcher reads the game's own startup lines from its stdout.
+      expect(options).toMatchObject({ cwd: root, detached: true, shell: false, windowsHide: false,
+        stdio: ['ignore', 'pipe', 'pipe'] });
+      expect(options.env).toMatchObject({ STEAMID: '76561190000000000',
+        H1Z1_OVERRIDE_STEAMID: '76561190000000000', H1Z1_OVERRIDE_PERSONA: 'FixturePlayer' });
+      // Nothing inherited may name another identity or another Steam game.
+      expect(options.env).not.toHaveProperty('H1Z1_LEFTOVER');
+      expect(options.env).not.toHaveProperty('STEAMAPPID');
+      f.child().exit(0);
+      await launched;
+    } finally {
+      delete process.env.H1Z1_LEFTOVER;
+      delete process.env.STEAMAPPID;
+    }
+  });
+});
+
 describe('a game that closes soon after a launch reported as started', () => {
   const hint = 'Si tu ne l’as pas fermé toi-même, relance le jeu ; si ça recommence, Debug (dans les réglages) permet d’envoyer un rapport à ROTK.';
   // Fake timers from the start, so the stability window and the measured delay
@@ -397,5 +447,61 @@ describe('a game that closes soon after a launch reported as started', () => {
     }
     expect(localizeServiceError(early, 'en')).toContain('App & browser control. If you did not close it yourself, start the game again;');
     expect(localizeServiceError(early, 'zh')).toContain('“智能应用控制”。如果不是你自己关闭的，');
+  });
+});
+
+describe('a game that freezes before it starts', () => {
+  async function running() {
+    vi.useFakeTimers();
+    const f = await fixture();
+    f.request.onStartupStalled = vi.fn();
+    const launched = f.launcher.launch(f.request);
+    await vi.waitFor(() => expect(f.diagnostics.onSpawned).toHaveBeenCalledWith(4242));
+    await vi.advanceTimersByTimeAsync(3_100);
+    await expect(launched).resolves.toBe(4242);
+    return f;
+  }
+
+  it('reports the stall once when the startup line never comes', async () => {
+    const f = await running();
+    f.child().stdout.write('H1Z1 PlayClient (Live)Startup.log: [Logging]\n');
+    await vi.advanceTimersByTimeAsync(GAME_STARTUP_STALL_MS);
+    expect(f.request.onStartupStalled).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(GAME_STARTUP_STALL_MS);
+    expect(f.request.onStartupStalled).toHaveBeenCalledOnce();
+    // The diagnostics still receive everything the game printed.
+    expect(f.diagnostics.onOutput).toHaveBeenCalledWith('stdout', 'H1Z1 PlayClient (Live)Startup.log: [Logging]\n');
+  });
+
+  it('stays quiet once the startup line arrives, even split across two chunks', async () => {
+    const f = await running();
+    const cut = 9;
+    f.child().stdout.write(`H1Z1.log: ${GAME_STARTUP_MARKER.slice(0, cut)}`);
+    await vi.advanceTimersByTimeAsync(10);
+    f.child().stdout.write(`${GAME_STARTUP_MARKER.slice(cut)}.\n`);
+    await vi.advanceTimersByTimeAsync(GAME_STARTUP_STALL_MS * 2);
+    expect(f.request.onStartupStalled).not.toHaveBeenCalled();
+  });
+
+  it('never reports a stall when the game has no stdout to read', async () => {
+    mocks.spawn.mockImplementationOnce(() => {
+      const child = new GameChild();
+      (child as { stdout: PassThrough | null }).stdout = null;
+      children.push(child);
+      return child;
+    });
+    const f = await running();
+    await vi.advanceTimersByTimeAsync(GAME_STARTUP_STALL_MS * 2);
+    expect(f.request.onStartupStalled).not.toHaveBeenCalled();
+  });
+
+  it('says nothing once the game has exited', async () => {
+    const f = await running();
+    f.child().stderr.write(`${GAME_STARTUP_MARKER}\n`);
+    await vi.advanceTimersByTimeAsync(1_000);
+    f.child().exit(0);
+    await vi.advanceTimersByTimeAsync(GAME_STARTUP_STALL_MS);
+    expect(f.request.onStartupStalled).not.toHaveBeenCalled();
+    expect(f.request.onExit).toHaveBeenCalledExactlyOnceWith(0);
   });
 });

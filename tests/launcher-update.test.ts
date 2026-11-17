@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LauncherUpdateSummary } from "../shared/contracts.js";
 import { hasLauncherUpdate, launcherUpdateBlocksPlay } from "../shared/launcher-update.js";
 import {
+  DOWNLOAD_STALL_MS,
   LauncherUpdateService,
   type DownloadProgressLike,
   type UpdateInfoLike,
@@ -119,6 +120,21 @@ describe("launcher self-update service", () => {
     expect(service.state).toMatchObject({ status: "idle", error: null });
   });
 
+  it("logs a failed check once, with a short code, while staying silent for the player", async () => {
+    const updater = new FakeUpdater();
+    const onCheckError = vi.fn();
+    const service = new LauncherUpdateService({ updater, onChange: () => undefined, onCheckError });
+    // An interrupted update can leave app-update.yml filled with NUL bytes (#245).
+    const damaged = Object.assign(new Error("null byte is not allowed in input"), { name: "YAMLException" });
+    updater.checkForUpdates.mockImplementationOnce(async () => {
+      updater.emit("error", damaged);
+      throw damaged;
+    });
+    await service.check();
+    expect(service.state).toMatchObject({ status: "idle", error: null });
+    expect(onCheckError).toHaveBeenCalledExactlyOnceWith("YAMLException");
+  });
+
   it("never downloads without a known available update", () => {
     const { updater, service } = createService();
     expect(service.download()).toBe("no-update");
@@ -151,7 +167,40 @@ describe("launcher self-update service", () => {
     service.download();
     updater.emit("update-downloaded");
     expect(service.install()).toBeNull();
-    expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
+    // Silent install, then the launcher starts again: no wizard to click through.
+    expect(updater.quitAndInstall).toHaveBeenCalledExactlyOnceWith(true, true);
+  });
+
+  it("turns a download that stops receiving data into a failed one, and still completes it if data comes back", async () => {
+    vi.useFakeTimers();
+    try {
+      const updater = new FakeUpdater();
+      const codes: string[] = [];
+      const service = new LauncherUpdateService({ updater, onChange: () => undefined, onDownloadError: (code) => codes.push(code) });
+      await service.check();
+      updater.emit("update-available", { version: "2.0.51" });
+      service.download();
+      // Progress keeps it alive, however long the whole download takes.
+      for (let step = 1; step <= 5; step += 1) {
+        await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_MS - 1_000);
+        updater.emit("download-progress", { percent: step * 10 });
+      }
+      expect(service.state).toMatchObject({ status: "downloading", progressPercent: 50 });
+      expect(codes).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_MS);
+      expect(service.state).toMatchObject({ status: "error", availableVersion: "2.0.51" });
+      expect(codes).toEqual(["stalled"]);
+      // Reported once, and the late end of that same download is accepted.
+      await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_MS * 3);
+      expect(codes).toEqual(["stalled"]);
+      updater.emit("update-downloaded");
+      expect(service.state.status).toBe("downloaded");
+      await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_MS * 3);
+      expect(service.state.status).toBe("downloaded");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores stray progress events outside a download", async () => {
@@ -162,7 +211,7 @@ describe("launcher self-update service", () => {
     expect(service.state).toMatchObject({ status: "update-available", progressPercent: null });
   });
 
-  it("keeps a known update across timer checks and download failures without locking Play", async () => {
+  it("keeps a known update across timer checks and download failures, and never locks Play for it", async () => {
     const { updater, service } = createService();
     await service.check();
     updater.emit("update-available", { version: "2.0.24" });
@@ -171,18 +220,22 @@ describe("launcher self-update service", () => {
     await service.check();
     expect(updater.checkForUpdates).toHaveBeenCalledTimes(1);
     expect(service.state.status).toBe("update-available");
+    // Offered by the banner, but only a refusal from the server blocks Play.
+    expect(launcherUpdateBlocksPlay(service.state)).toBe(false);
     service.download();
     expect(hasLauncherUpdate(service.state)).toBe(true);
-    expect(launcherUpdateBlocksPlay(service.state)).toBe(true);
+    expect(launcherUpdateBlocksPlay(service.state)).toBe(false);
     updater.emit("error", new Error("offline"));
     await service.check();
     expect(service.state).toMatchObject({ status: "error", availableVersion: "2.0.24" });
-    // The banner keeps the error and Retry, but a failed download must not lock Play.
+    // The banner keeps the error and Retry.
     expect(hasLauncherUpdate(service.state)).toBe(true);
     expect(launcherUpdateBlocksPlay(service.state)).toBe(false);
     service.download();
     updater.emit("update-downloaded");
-    expect(launcherUpdateBlocksPlay(service.state)).toBe(true);
+    // Downloaded and waiting for a restart: still the player's choice.
+    expect(hasLauncherUpdate(service.state)).toBe(true);
+    expect(launcherUpdateBlocksPlay(service.state)).toBe(false);
   });
 
   it("reports a short code, never the raw updater message, for a failed download", async () => {

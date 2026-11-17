@@ -227,6 +227,9 @@ function parseChallenge(
   return challenge;
 }
 
+const CHALLENGE_NETWORK_ATTEMPTS = 2;
+const CHALLENGE_RETRY_DELAY_MS = 350;
+
 export async function requestAttestationChallenge(
   playerKey: string,
   endpointValue: string,
@@ -244,18 +247,27 @@ export async function requestAttestationChallenge(
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const requestedAtMonotonicMs = performance.now();
   try {
-    let response: Response;
-    try {
-      response = await fetchImpl(endpoint, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ launcherKey: playerKey, launcherVersion }),
-        cache: "no-store",
-        redirect: "error",
-        signal: controller.signal,
-      });
-    } catch {
-      throw attestationError("Unable to reach the ROTK integrity service");
+    let response: Response | undefined;
+    for (let attempt = 0; response === undefined; attempt += 1) {
+      try {
+        response = await fetchImpl(endpoint, {
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({ launcherKey: playerKey, launcherVersion }),
+          cache: "no-store",
+          redirect: "error",
+          signal: controller.signal,
+        });
+      } catch {
+        // A challenge that never arrived was not used for anything, so a failed
+        // lookup or a dropped connection is asked once more, within the same
+        // overall timeout. One failed request used to make the whole
+        // attestation unavailable and, under enforcement, refuse the launch.
+        if (attempt === CHALLENGE_NETWORK_ATTEMPTS - 1 || controller.signal.aborted) {
+          throw attestationError("Unable to reach the ROTK integrity service");
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, CHALLENGE_RETRY_DELAY_MS));
+      }
     }
     let payload: unknown;
     try {
@@ -376,6 +388,50 @@ async function saveCache(userDataDirectory: string, cache: CacheMap): Promise<vo
   } catch {
     // A cache we cannot persist only costs time on the next launch.
   }
+}
+
+export interface WarmArchiveDigestsOptions {
+  installationRoot: string;
+  userDataDirectory: string;
+  /** Asked before each archive and before each write: true ends the pass. */
+  shouldStop(): boolean;
+}
+
+/**
+ * Hashes, ahead of Play, the archives whose digest is not in the cache yet:
+ * a fresh install, or packs an asset update just replaced. Play then finds
+ * them in the cache instead of reading about 17 GB while the player waits.
+ *
+ * Nothing about what a launch trusts changes: the cache holds the same
+ * entries a measurement would have written, checked against size and
+ * modification time when they are used. Returns how many archives it hashed.
+ */
+export async function warmArchiveDigests(options: WarmArchiveDigestsOptions): Promise<number> {
+  const { installationRoot, userDataDirectory, shouldStop } = options;
+  const archives: string[] = [];
+  await walkInstallation(installationRoot, (relative) => {
+    if (isCachedArchive(relative)) archives.push(relative);
+    return !shouldStop();
+  });
+  let hashed = 0;
+  for (const relative of archives) {
+    if (shouldStop()) break;
+    const absolute = join(installationRoot, ...relative.split("/"));
+    const fileStat = await stat(absolute).catch(() => null);
+    if (!fileStat?.isFile()) continue;
+    const key = manifestPathKey(relative);
+    // Read again each time: a launch may have rewritten the cache meanwhile.
+    const known = (await loadCache(userDataDirectory)).get(key);
+    if (known && known.size === fileStat.size && known.mtimeMs === fileStat.mtimeMs) continue;
+    const sha256 = await sha256File(absolute).catch(() => null);
+    // A launch that started during the read measures this file itself.
+    if (sha256 === null || shouldStop()) continue;
+    const cache = await loadCache(userDataDirectory);
+    cache.set(key, { size: fileStat.size, mtimeMs: fileStat.mtimeMs, sha256 });
+    await saveCache(userDataDirectory, cache);
+    hashed += 1;
+  }
+  return hashed;
 }
 
 export interface MeasureOptions {
@@ -588,31 +644,38 @@ export async function measureInstallation(options: MeasureOptions): Promise<Meas
 
   onProgress?.({ phase: "measuring", hashedFiles: 0, totalFiles: expected.length, hashedBytes: 0, totalBytes });
 
-  for (const entry of expected) {
-    if (!isManifestPath(entry.path)) throw attestationError("The integrity manifest contains an invalid path.");
-    const absolute = join(installationRoot, ...entry.path.split("/"));
-    const fileStat = await stat(absolute).catch(() => null);
-    if (!fileStat?.isFile()) {
-      deviations.push({ path: entry.path, kind: "missing", observedSha256: null });
+  try {
+    for (const entry of expected) {
+      if (!isManifestPath(entry.path)) throw attestationError("The integrity manifest contains an invalid path.");
+      const absolute = join(installationRoot, ...entry.path.split("/"));
+      const fileStat = await stat(absolute).catch(() => null);
+      if (!fileStat?.isFile()) {
+        deviations.push({ path: entry.path, kind: "missing", observedSha256: null });
+        hashedFiles += 1;
+        continue;
+      }
+      const cacheKey = manifestPathKey(entry.path);
+      // Only an archive may take its digest from the cache; see isCachedArchive.
+      const cached = isCachedArchive(entry.path) ? cache.get(cacheKey) : undefined;
+      const digest = cached && cached.size === fileStat.size && cached.mtimeMs === fileStat.mtimeMs
+        ? cached.sha256
+        // An antivirus or sync client can hold a game file for a moment.
+        : await retryFs(() => sha256File(absolute));
+      nextCache.set(cacheKey, { size: fileStat.size, mtimeMs: fileStat.mtimeMs, sha256: digest });
+      observed.push({ path: entry.path, size: fileStat.size, sha256: digest });
+      if (digest !== entry.sha256) {
+        deviations.push({ path: entry.path, kind: "mismatch", observedSha256: digest });
+      }
       hashedFiles += 1;
-      continue;
+      hashedBytes += fileStat.size;
+      if (hashedFiles % 50 === 0) {
+        onProgress?.({ phase: "measuring", hashedFiles, totalFiles: expected.length, hashedBytes, totalBytes });
+      }
     }
-    const cacheKey = manifestPathKey(entry.path);
-    // Only an archive may take its digest from the cache; see isCachedArchive.
-    const cached = isCachedArchive(entry.path) ? cache.get(cacheKey) : undefined;
-    const digest = cached && cached.size === fileStat.size && cached.mtimeMs === fileStat.mtimeMs
-      ? cached.sha256
-      : await sha256File(absolute);
-    nextCache.set(cacheKey, { size: fileStat.size, mtimeMs: fileStat.mtimeMs, sha256: digest });
-    observed.push({ path: entry.path, size: fileStat.size, sha256: digest });
-    if (digest !== entry.sha256) {
-      deviations.push({ path: entry.path, kind: "mismatch", observedSha256: digest });
-    }
-    hashedFiles += 1;
-    hashedBytes += fileStat.size;
-    if (hashedFiles % 50 === 0) {
-      onProgress?.({ phase: "measuring", hashedFiles, totalFiles: expected.length, hashedBytes, totalBytes });
-    }
+  } catch (error) {
+    // Keep what was already hashed: the next Play must not hash it all again.
+    await saveCache(userDataDirectory, new Map([...cache, ...nextCache]));
+    throw error;
   }
 
   const unexpected = options.detectUnexpected

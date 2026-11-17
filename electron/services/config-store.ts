@@ -8,6 +8,7 @@ import {
   type PlayerRole,
   type ServerId,
 } from "../../shared/launch-profile.js";
+import type { LauncherPreferences } from "../../shared/preferences.js";
 
 export interface InstalledClientConfig {
   installId: string;
@@ -25,6 +26,8 @@ export interface LauncherConfig {
   pendingInstallRoot?: string;
   /** Custom asset synchronization before launch. Defaults to enabled. */
   assetSyncEnabled?: boolean;
+  /** Download a launcher update as soon as it is found. Off until the player turns it on. */
+  launcherUpdateAutoDownload?: boolean;
   /** Native diagnostic observer for the next launched game; defaults to enabled. */
   diagnosticCaptureEnabled?: boolean;
   /** Optional full-session performance recording; off until the player enables it. */
@@ -43,12 +46,16 @@ export interface LauncherConfig {
   playerFont?: string;
   /** Same ids, for the launcher's own interface; absent means its stock fonts. */
   launcherFont?: string;
+  /** What the player changed in the settings; an absent field keeps its default. */
+  preferences?: Partial<LauncherPreferences>;
 }
 
 interface StoredConfigCandidate {
   path: string;
   config: LauncherConfig;
   needsRewrite: boolean;
+  /** Stored fields this build could not read. */
+  ignored: string[];
 }
 
 export type InstallationMigrationValidator = (installation: InstalledClientConfig) => Promise<boolean>;
@@ -57,47 +64,64 @@ function freshConfig(): LauncherConfig {
   return { schemaVersion: 1 };
 }
 
-function isValidConfig(value: unknown): value is LauncherConfig {
+function isInstallation(value: unknown): value is InstalledClientConfig {
   if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<LauncherConfig>;
-  const installation = candidate.installation;
-  const installationIsValid =
-    installation === undefined ||
-    (typeof installation.installId === "string" &&
-      typeof installation.clientBuildId === "string" &&
-      typeof installation.root === "string" &&
-      typeof installation.sourceRoot === "string" &&
-      typeof installation.installedAt === "string" &&
-      installation.criticalHashes !== null &&
-      typeof installation.criticalHashes === "object");
-  return (
-    candidate.schemaVersion === 1 &&
-    installationIsValid &&
-    (candidate.pendingInstallRoot === undefined || typeof candidate.pendingInstallRoot === "string") &&
-    (candidate.assetSyncEnabled === undefined || typeof candidate.assetSyncEnabled === "boolean") &&
-    (candidate.diagnosticCaptureEnabled === undefined || typeof candidate.diagnosticCaptureEnabled === "boolean") &&
-    (candidate.debugSessionEnabled === undefined || typeof candidate.debugSessionEnabled === "boolean") &&
-    (candidate.diagnosticUploadConsent === undefined || candidate.diagnosticUploadConsent === 1) &&
-    (candidate.serverId === undefined || isServerId(candidate.serverId)) &&
-    (candidate.playerFont === undefined || (typeof candidate.playerFont === "string" && /^[a-z0-9]{1,32}$/.test(candidate.playerFont))) &&
-    (candidate.launcherFont === undefined || (typeof candidate.launcherFont === "string" && /^[a-z0-9]{1,32}$/.test(candidate.launcherFont))) &&
-    (candidate.role === undefined || isPlayerRole(candidate.role))
-  );
+  const installation = value as Partial<InstalledClientConfig>;
+  return typeof installation.installId === "string"
+    && typeof installation.clientBuildId === "string"
+    && typeof installation.root === "string"
+    && typeof installation.sourceRoot === "string"
+    && typeof installation.installedAt === "string"
+    && installation.criticalHashes !== null
+    && typeof installation.criticalHashes === "object";
 }
 
-function withoutLegacyIdentity(value: LauncherConfig): LauncherConfig {
-  const next: LauncherConfig = { schemaVersion: 1 };
-  if (value.installation) next.installation = value.installation;
-  if (value.pendingInstallRoot !== undefined) next.pendingInstallRoot = value.pendingInstallRoot;
-  if (value.assetSyncEnabled !== undefined) next.assetSyncEnabled = value.assetSyncEnabled;
-  if (value.diagnosticCaptureEnabled !== undefined) next.diagnosticCaptureEnabled = value.diagnosticCaptureEnabled;
-  if (value.debugSessionEnabled !== undefined) next.debugSessionEnabled = value.debugSessionEnabled;
-  if (value.diagnosticUploadConsent === 1) next.diagnosticUploadConsent = 1;
-  if (value.serverId !== undefined) next.serverId = value.serverId;
-  if (value.role !== undefined) next.role = value.role;
-  if (value.playerFont !== undefined) next.playerFont = value.playerFont;
-  if (value.launcherFont !== undefined) next.launcherFont = value.launcherFont;
-  return next;
+const isFontId = (value: unknown): boolean => typeof value === "string" && /^[a-z0-9]{1,32}$/.test(value);
+const isBoolean = (value: unknown): boolean => typeof value === "boolean";
+
+/** What makes each stored field usable by this build. */
+const FIELD_VALIDATORS: { [K in Exclude<keyof LauncherConfig, "schemaVersion">]-?: (value: unknown) => boolean } = {
+  installation: isInstallation,
+  pendingInstallRoot: (value) => typeof value === "string",
+  assetSyncEnabled: isBoolean,
+  launcherUpdateAutoDownload: isBoolean,
+  diagnosticCaptureEnabled: isBoolean,
+  debugSessionEnabled: isBoolean,
+  diagnosticUploadConsent: (value) => value === 1,
+  serverId: isServerId,
+  role: isPlayerRole,
+  playerFont: isFontId,
+  launcherFont: isFontId,
+  // Kept as stored, and read field by field (storedPreferences): a value of
+  // another launcher version stays in the file instead of taking the others with it.
+  preferences: (value) => value !== null && typeof value === "object" && !Array.isArray(value),
+};
+
+/**
+ * Reads a stored configuration field by field: what this build understands is
+ * kept, the rest is listed in `ignored` and left out. Null when the file is
+ * not a configuration of this schema at all.
+ *
+ * The file used to be valid as a whole or not at all. One value this build did
+ * not know (a server, a role or a font written by a newer or a beta launcher)
+ * made the whole file invalid, its backup with it, and the launcher started as
+ * if nothing had ever been installed, without a word. Fields that are not part
+ * of the configuration, such as the player identity of old launchers, are
+ * left out too.
+ */
+function readConfig(value: unknown): { config: LauncherConfig; ignored: string[] } | null {
+  if (!value || typeof value !== "object") return null;
+  const stored = value as Record<string, unknown>;
+  if (stored.schemaVersion !== 1) return null;
+  const config: Record<string, unknown> = { schemaVersion: 1 };
+  const ignored: string[] = [];
+  for (const [field, isValid] of Object.entries(FIELD_VALIDATORS)) {
+    const fieldValue = stored[field];
+    if (fieldValue === undefined) continue;
+    if (isValid(fieldValue)) config[field] = fieldValue;
+    else ignored.push(field);
+  }
+  return { config: config as unknown as LauncherConfig, ignored };
 }
 
 export class ConfigStore {
@@ -105,13 +129,17 @@ export class ConfigStore {
   private readonly backupPath: string;
   private readonly legacyConfigPaths: readonly string[];
   private readonly validateMigratedInstallation: InstallationMigrationValidator | null;
+  private readonly onIgnoredFields: (fields: string[]) => void;
   private config: LauncherConfig | null = null;
 
   constructor(
     userDataDirectory: string,
     legacyUserDataDirectories: readonly string[] = [],
     validateMigratedInstallation: InstallationMigrationValidator | null = null,
+    /** Fields of the configuration in use that this build could not read; for the launcher log. */
+    onIgnoredFields: (fields: string[]) => void = () => undefined,
   ) {
+    this.onIgnoredFields = onIgnoredFields;
     this.configPath = join(userDataDirectory, "config.v1.json");
     this.backupPath = join(userDataDirectory, "config.v1.backup.json");
     this.validateMigratedInstallation = validateMigratedInstallation;
@@ -131,11 +159,13 @@ export class ConfigStore {
     for (const path of [...new Set(candidates)]) {
       try {
         const parsed: unknown = JSON.parse(await retryFs(() => readFile(path, "utf8")));
-        if (!isValidConfig(parsed)) continue;
+        const read = readConfig(parsed);
+        if (!read) continue;
         const candidate = {
           path,
-          config: withoutLegacyIdentity(parsed),
+          config: read.config,
           needsRewrite: Object.prototype.hasOwnProperty.call(parsed, "identity"),
+          ignored: read.ignored,
         };
         if (
           path !== this.configPath
@@ -158,6 +188,7 @@ export class ConfigStore {
 
     selected ??= firstValid;
     if (selected) {
+      if (selected.ignored.length > 0) this.onIgnoredFields(selected.ignored);
       if (selected.path !== this.configPath || selected.needsRewrite) {
         await this.save(selected.config);
         if (selected.path !== this.configPath && selected.needsRewrite) {
@@ -210,6 +241,26 @@ export class ConfigStore {
   async setAssetSyncEnabled(assetSyncEnabled: boolean): Promise<LauncherConfig> {
     const current = await this.load();
     const next: LauncherConfig = { ...current, assetSyncEnabled };
+    await this.save(next);
+    return next;
+  }
+
+  async setLauncherUpdateAutoDownload(launcherUpdateAutoDownload: boolean): Promise<LauncherConfig> {
+    const next: LauncherConfig = { ...await this.load(), launcherUpdateAutoDownload };
+    await this.save(next);
+    return next;
+  }
+
+  async setPreferences(preferences: Partial<LauncherPreferences>): Promise<LauncherConfig> {
+    const current = await this.load();
+    const next: LauncherConfig = { ...current, preferences: { ...current.preferences, ...preferences } };
+    await this.save(next);
+    return next;
+  }
+
+  /** Forgets the installed client (it was uninstalled); every other setting stays. */
+  async clearInstallation(): Promise<LauncherConfig> {
+    const { installation: _removed, pendingInstallRoot: _pending, ...next } = await this.load();
     await this.save(next);
     return next;
   }

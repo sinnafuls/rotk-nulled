@@ -23,14 +23,25 @@ export interface UpdaterLike {
   on(event: "error", listener: (error: Error) => void): unknown;
   checkForUpdates(): Promise<unknown>;
   downloadUpdate(): Promise<unknown>;
-  quitAndInstall(): void;
+  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
 }
 
 export interface LauncherUpdateOptions {
   updater: UpdaterLike | null;
+  /**
+   * Asked each time an update is known and not downloaded yet: true starts
+   * the download without a click. The caller decides (the player's setting,
+   * no game running). Absent means never.
+   */
+  autoDownload?: () => boolean;
   onChange: (state: LauncherUpdateSummary) => void;
   /** Short failure code for logs; the raw message may carry signed URLs. */
   onDownloadError?: (code: string) => void;
+  /**
+   * A check that failed (GitHub unreachable, damaged update configuration
+   * after an interrupted update). Silent for the player, but logged.
+   */
+  onCheckError?: (code: string) => void;
 }
 
 const IDLE_STATE: LauncherUpdateSummary = {
@@ -42,16 +53,26 @@ const IDLE_STATE: LauncherUpdateSummary = {
 
 export type LauncherUpdateFailure = "unavailable" | "not-downloaded" | "no-update";
 
+/** A download with no progress for this long is reported as failed. */
+export const DOWNLOAD_STALL_MS = 60_000;
+
 export class LauncherUpdateService {
+  private readonly autoDownload: () => boolean;
+  /** The download in flight was started by the launcher, not by a click. */
+  private unattended = false;
   private readonly updater: UpdaterLike | null;
   private readonly onChange: (state: LauncherUpdateSummary) => void;
   private readonly onDownloadError: (code: string) => void;
+  private readonly onCheckError: (code: string) => void;
   private current: LauncherUpdateSummary = { ...IDLE_STATE };
+  private stallTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: LauncherUpdateOptions) {
+    this.autoDownload = options.autoDownload ?? (() => false);
     this.updater = options.updater;
     this.onChange = options.onChange;
     this.onDownloadError = options.onDownloadError ?? (() => undefined);
+    this.onCheckError = options.onCheckError ?? (() => undefined);
     if (!this.updater) return;
 
     this.updater.autoDownload = false;
@@ -66,12 +87,14 @@ export class LauncherUpdateService {
         progressPercent: null,
         error: null,
       });
+      this.downloadIfAllowed();
     });
     this.updater.on("update-not-available", () => {
       this.transition({ ...IDLE_STATE, status: "up-to-date" });
     });
     this.updater.on("download-progress", (progress) => {
       if (this.current.status !== "downloading") return;
+      this.watchForStall();
       this.transition({
         ...this.current,
         progressPercent: clampPercent(progress.percent),
@@ -90,15 +113,17 @@ export class LauncherUpdateService {
       // working offline. A failed download was user-initiated and deserves
       // a visible, retryable error.
       if (this.current.status === "downloading") {
+        // A download nobody asked for fails quietly: the update is offered
+        // again, and the next check retries it.
         this.transition({
           ...this.current,
-          status: "error",
+          status: this.unattended ? "update-available" : "error",
           progressPercent: null,
-          error: error.message,
+          error: this.unattended ? null : error.message,
         });
         this.onDownloadError(updateErrorCode(error));
-      } else if (this.current.status === "checking") {
-        this.transition({ ...IDLE_STATE });
+      } else {
+        this.checkFailed(error);
       }
     });
   }
@@ -109,6 +134,8 @@ export class LauncherUpdateService {
 
   async check(): Promise<void> {
     if (!this.updater) return;
+    // Known but not downloaded (a game was running, or the setting was off).
+    this.downloadIfAllowed();
     if (
       this.current.status === "checking"
       || hasLauncherUpdate(this.current)
@@ -118,17 +145,28 @@ export class LauncherUpdateService {
     this.transition({ ...IDLE_STATE, status: "checking" });
     try {
       await this.updater.checkForUpdates();
-    } catch {
-      this.resetIfChecking();
+    } catch (error) {
+      this.checkFailed(error);
     }
   }
 
-  private resetIfChecking(): void {
-    if (this.current.status === "checking") this.transition({ ...IDLE_STATE });
+  // The rejection and the "error" event can both report one failed check.
+  private checkFailed(error: unknown): void {
+    if (this.current.status !== "checking") return;
+    this.transition({ ...IDLE_STATE });
+    this.onCheckError(updateErrorCode(error instanceof Error ? error : new Error(String(error))));
+  }
+
+  private downloadIfAllowed(): void {
+    if (this.current.status !== "update-available" || !this.autoDownload()) return;
+    this.download();
+    this.unattended = true;
   }
 
   download(): LauncherUpdateFailure | null {
     if (!this.updater) return "unavailable";
+    // A click on a download already under way makes it the player's own.
+    this.unattended = false;
     if (this.current.status === "downloading" || this.current.status === "downloaded") return null;
     if (this.current.status !== "update-available" && this.current.status !== "error") {
       return "no-update";
@@ -140,6 +178,7 @@ export class LauncherUpdateService {
       progressPercent: 0,
       error: null,
     });
+    this.watchForStall();
     this.updater.downloadUpdate().catch(() => {
       // The terminal state is reported through the "error" event; this catch
       // only prevents an unhandled rejection when the download fails.
@@ -150,11 +189,40 @@ export class LauncherUpdateService {
   install(): LauncherUpdateFailure | null {
     if (!this.updater) return "unavailable";
     if (this.current.status !== "downloaded") return "not-downloaded";
-    this.updater.quitAndInstall();
+    // Silent, then start the launcher again. The default opened the installer
+    // wizard: several pages to click through, one of which offers to move the
+    // installation, before the player could reopen the launcher by hand.
+    this.updater.quitAndInstall(true, true);
     return null;
   }
 
+  /**
+   * The updater has no timeout of its own under Electron: a download that
+   * stops receiving data stayed on "downloading N%" for good, with no button
+   * left. Without progress for a while it becomes a failed download, which
+   * offers Retry. Data that arrives afterwards still completes it.
+   */
+  private watchForStall(): void {
+    if (this.stallTimer) clearTimeout(this.stallTimer);
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
+      if (this.current.status !== "downloading") return;
+      this.transition({
+        ...this.current,
+        status: "error",
+        progressPercent: null,
+        error: "The download stopped receiving data.",
+      });
+      this.onDownloadError("stalled");
+    }, DOWNLOAD_STALL_MS);
+    this.stallTimer.unref?.();
+  }
+
   private transition(next: LauncherUpdateSummary): void {
+    if (next.status !== "downloading" && this.stallTimer) {
+      clearTimeout(this.stallTimer);
+      this.stallTimer = null;
+    }
     this.current = next;
     this.onChange(this.state);
   }

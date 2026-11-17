@@ -1,8 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import { rotateIdentity } from "./services/synthetic-identity.js";
-import { runNetworkCheck } from "./services/network-check.js";
-import type { NetworkCheckReport } from "../shared/contracts.js";
 import { mkdir, realpath, stat, statfs } from "node:fs/promises";
 import { join, basename, dirname, parse, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,9 +10,11 @@ import {
   dialog,
   ipcMain,
   Menu,
+  Notification,
   safeStorage,
   session,
   shell,
+  Tray,
   type IpcMainInvokeEvent,
 } from "electron";
 import {
@@ -34,6 +33,7 @@ import {
   type PlayerFontPreview,
 } from "../shared/contracts.js";
 import { isAppLocale, type AppLocale } from "../shared/locale.js";
+import { DEFAULT_PREFERENCES, readPreferences, storedPreferences, type LauncherPreferences } from "../shared/preferences.js";
 import {
   DEFAULT_PLAYER_ROLE,
   DEFAULT_SERVER_ID,
@@ -59,9 +59,12 @@ import {
   resolveBundledFontsPath,
 } from "./constants.js";
 import { ConfigStore } from "./services/config-store.js";
-import { DiscordPresence } from "./services/discord-presence.js";
-import { adoptExistingClient, cleanupInstallLeftovers, inspectDestination, installClient, lostWithLauncherFolder } from "./services/installer.js";
+import { assertVisualCppRuntime } from "./services/visual-cpp-runtime.js";
+import { DISCORD_INVITE_URL, DiscordPresence } from "./services/discord-presence.js";
+import { adoptExistingClient, adoptedInPlace, cleanupInstallLeftovers, inspectDestination, installClient, lostWithLauncherFolder, readInstallationMarker, removeInstallation } from "./services/installer.js";
+import { folderSize } from "./services/folder-size.js";
 import {
+  GAME_STARTUP_STALL_MS,
   GameLauncher,
   assertExecutableNotRunning,
   stopGameFromInstallation,
@@ -69,12 +72,13 @@ import {
   type AttestationOutcome,
 } from "./services/game-launcher.js";
 import type { InputProfileRecovery } from "./services/input-profile-recovery.js";
-import { HWID_CORE_SLOTS, collectHwid } from "./services/machine-identity.js";
-import { collectTpmProof } from "./services/tpm-identity.js";
-import { collectTpmAnchor, enrolTpmAnchor } from "./services/tpm-anchor.js";
-import { tpmBindingMessage } from "../shared/attestation.js";
+import { collectHwid } from "./services/machine-identity.js";
+import { rotateIdentity } from "./services/synthetic-identity.js";
+import { runNetworkCheck } from "./services/network-check.js";
+import type { NetworkCheckReport } from "../shared/contracts.js";
 import { PathPolicyError, assertOutsideLauncherFolder, classifyClientSource, validateInstallDestination } from "./services/path-policy.js";
 import { H1Z1_STEAM_APP_ID, locateSteamClient } from "./services/steam-locator.js";
+import { phaseAfterSelection } from "./services/setup-phase.js";
 import {
   runtimeConfigFor,
   runtimeConfigList,
@@ -87,7 +91,9 @@ import {
   type ServerStatus,
 } from "./services/server-status.js";
 import { UpdateFeedService } from "./services/update-feed.js";
-import { AssetSyncService, assetSyncInternals } from "./services/asset-sync.js";
+import { fetchEvents, fetchHomeChoice } from "./services/events-feed.js";
+import { AssetSyncService, assetStorageFor, assetSyncInternals } from "./services/asset-sync.js";
+import { warmArchiveDigests } from "./services/integrity-attestation.js";
 import { DEFAULT_PLAYER_FONT, playerFont, playerFontPreview, readPlayerFontManifest } from "./services/player-fonts.js";
 import { LauncherUpdateService } from "./services/launcher-update.js";
 import { launcherUpdateBlocksPlay } from "../shared/launcher-update.js";
@@ -95,38 +101,24 @@ import electronUpdater from "electron-updater";
 import { localizeServiceError, MAIN_COPY } from "./i18n.js";
 import { identityFromPlayerKey } from "./services/player-identity.js";
 import { PlayerKeyStore, type PlayerKeySet } from "./services/player-key-store.js";
-import { readInstallationMarker } from "./services/installer.js";
-import {
-  BASE_MANIFEST_URL,
-  loadBaseManifest,
-  mergeExpectedFiles,
-  readLauncherOverrides,
-} from "./services/base-manifest.js";
-import {
-  AttestationUnavailableError,
-  attestationChallengeRemainingMs,
-  buildAttestationResult,
-  measureInstallation,
-  requestAttestationChallenge,
-  type AttestationProgress,
-} from "./services/integrity-attestation.js";
+import type { AttestationProgress } from "./services/integrity-attestation.js";
+import { attestInstallation as runLaunchAttestation } from "./services/launch-attestation.js";
 import { DiagnosticController } from "./services/diagnostic-controller.js";
-import { StartupLog } from "./services/startup-log.js";
+import { keepsLauncherAlive, mayQuitWithoutWindow } from "./services/quit-policy.js";
+import { STARTUP_LOG_NAME, StartupLog } from "./services/startup-log.js";
+import { readWhenFree } from "./services/startup-read.js";
 import { describeSystemError, isSystemError } from "./services/system-error.js";
+import { acquireLockAfterHandoff, isElevationRelaunch } from "./services/instance-lock.js";
 import { redactDiagnosticText } from "./services/diagnostic-redaction.js";
+import { ELEVATION_RELAUNCH_ARGUMENT } from "./services/startup-elevation.js";
 import { createHash } from 'node:crypto';
 import { uploadDiagnostic } from "./services/diagnostic-upload.js";
+import { WINDOW_FAILURE_MEMORY_MS, windowRecovery } from "./services/window-recovery.js";
 import { collectDiagnosticClientContext } from "./services/diagnostic-client-context.js";
+import { clearUpdateAttempt, failedUpdateAttempt, recordUpdateAttempt } from "./services/update-attempt.js";
 import type { DiagnosticSessionContext } from "./services/diagnostic-reports.js";
 import type { DiagnosticCaptureRequest, DiagnosticExportRequest, DiagnosticState } from "../shared/diagnostics.js";
-import {
-  GAMEPLAY_MARKER_SHA256,
-  GAMEPLAY_PATCH_SHA256,
-  applyGameplayPatchMode,
-  readCachedGameplayPatchMode,
-  recordGameplayPatchState,
-  type GameplayPatchMode,
-} from "./services/gameplay-patch.js";
+import { readCachedGameplayPatchMode } from "./services/gameplay-patch.js";
 
 app.setName(APP_NAME);
 if (!app.isPackaged && process.env.ROTK_USER_DATA_DIR) {
@@ -146,12 +138,24 @@ try {
 } catch {
   // A read-only user-data directory is not a reason to refuse to start.
 }
+// Windows shows a notification only for the application identity its Start
+// menu shortcut carries: the installer writes it from `appId` in package.json.
+if (process.platform === "win32") app.setAppUserModelId("app.rotk.launcher");
 // Breadcrumbs from here to the first paint, in %APPDATA%\ROTK Launcher\startup.log.
 const startupLog = new StartupLog(app.getPath("userData"));
-const singleInstanceLock = app.requestSingleInstanceLock();
+// The administrator relaunch waits for the lock of the process that asked for
+// it, which now keeps it until it quits (see instance-lock.ts).
+const singleInstanceLock = acquireLockAfterHandoff({
+  request: () => app.requestSingleInstanceLock(),
+  relaunched: isElevationRelaunch(process.argv),
+  pause: (milliseconds) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds); },
+  now: () => Date.now(),
+});
 if (singleInstanceLock) {
   startupLog.begin(
     `start ${app.getVersion()} packaged=${app.isPackaged} electron=${process.versions.electron} windows=${process.getSystemVersion()}`,
+    // The administrator relaunch goes on in the log of the process that asked for it.
+    process.argv.includes(ELEVATION_RELAUNCH_ARGUMENT),
   );
 } else {
   // Another launcher owns this user's lock: it receives "second-instance" and
@@ -161,6 +165,8 @@ if (singleInstanceLock) {
   // the owner on the same files (2.0.14 reports: a first instance stuck
   // without a window made every further click spawn a process that died at
   // once).
+  // Leaves a line in the owner's log: this exit used to leave no trace at all.
+  startupLog.mark("second-start-handed-over", `pid=${process.pid}`);
   app.quit();
 }
 
@@ -190,9 +196,17 @@ const servicesReady = new Promise<void>((resolve) => {
 });
 const gameLauncher = new GameLauncher();
 const discordPresence = new DiscordPresence();
-const LAUNCHER_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1_000;
+// A launcher left open used to learn about a new release up to four hours
+// late, or after a restart. It now looks every quarter of an hour, and when
+// the player comes back to its window (at most once every five minutes).
+const LAUNCHER_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1_000;
+const LAUNCHER_UPDATE_FOCUS_GAP_MS = 5 * 60 * 1_000;
+let launcherUpdateCheckedAt = 0;
 // The window is shown at the latest this long after its creation, painted or not.
 const WINDOW_SHOW_DEADLINE_MS = 5_000;
+// How often the publications are read again while the launcher stays open.
+const NEWS_REFRESH_INTERVAL_MS = 15 * 60 * 1_000;
+/** The install lock: held by an install, a repair or an uninstall for as long as it changes the game folder. */
 let installAbortController: AbortController | null = null;
 let phase: LauncherPhase = "unconfigured";
 let sourceRoot: string | null = null;
@@ -202,9 +216,21 @@ let sourceDetected = false;
 let destinationRecommended = false;
 let progress: LauncherSnapshot["progress"] = null;
 let updates: LauncherSnapshot["updates"] = [];
+let events: LauncherSnapshot["events"] = [];
+let banner: LauncherSnapshot["banner"] = null;
+let featured: LauncherSnapshot["featured"] = [];
+let backgrounds: LauncherSnapshot["backgrounds"] = { images: [], rotateSeconds: null };
+// What the staff changes on the site must show within about a minute, and at
+// once when the player comes back to the window.
+const HOME_CHOICE_INTERVAL_MS = 60_000;
+const HOME_CHOICE_FOCUS_GAP_MS = 10_000;
+let homeChoiceReadAt = 0;
 let lastErrorRaw: string | null = null;
 // Kept until dismissed or the next Play, so a failed launch cannot hide it.
 let inputProfileRecovery: InputProfileRecovery | null = null;
+// H1Z1 froze before its window and the launcher started it again: said until
+// dismissed or the next Play, so the second start is not a surprise.
+let startupStallRelaunched = false;
 // Set when the server refuses a launch for launcher_update_required: the update
 // becomes mandatory (Play is blocked) until a newer launcher is installed.
 let updateRequired = false;
@@ -217,10 +243,21 @@ let serverStatus: Partial<Record<ServerId, ServerStatus>> = {};
 let quitWhenGameExits = false;
 let crashReportRequests = 0;
 let assetSyncEnabled = true;
+let launcherUpdateAutoDownload = false;
+let preferences: LauncherPreferences = { ...DEFAULT_PREFERENCES };
+/** Shown while the window is kept near the clock; gone as soon as the window is back. */
+let tray: Tray | null = null;
+/** The launcher is really quitting: a window asked to hide on close must let go. */
+let quitting = false;
 let playerFontOptions: PlayerFontOption[] = [];
 let selectedPlayerFont = DEFAULT_PLAYER_FONT;
 let selectedLauncherFont = DEFAULT_PLAYER_FONT;
 let assetSyncRunning = false;
+// The pass started on the launcher's own initiative, while it runs.
+let backgroundAssetSync: Promise<unknown> | null = null;
+let archiveDigestWarmup = false;
+// How often an open launcher looks for new asset packs on its own.
+const LAUNCH_PREPARATION_INTERVAL_MS = 15 * 60 * 1_000;
 let assetSyncStatus: AssetSyncStatus = "idle";
 let assetSyncWarning: AssetSyncWarning | null = null;
 let assetSyncProgress: AssetSyncProgress | null = null;
@@ -267,6 +304,17 @@ function validDiagnosticDescription(value: unknown): value is string {
 
 function diagnosticWorkInProgress(): boolean {
   return debugSettingWrite || crashReportRequests > 0 || Boolean(diagnostics?.isBusy());
+}
+
+/** Quits a launcher whose window the player closed, once nothing is left to wait for. */
+function quitIfIdle(): void {
+  if (mayQuitWithoutWindow({
+    windowClosedByPlayer: quitWhenGameExits,
+    windowOpen: mainWindow !== null,
+    gameRunning: gameLauncher.isRunning(),
+    phase,
+    diagnosticWork: diagnosticWorkInProgress(),
+  })) app.quit();
 }
 
 function bundledResourcesRoot(): string {
@@ -329,6 +377,70 @@ async function confirmCloseGame(message: string): Promise<boolean> {
   return response === 0;
 }
 
+/**
+ * Play refuses a Visual C++ runtime that is missing or too old, but only after
+ * its asset download. Say it as soon as the installation is known instead: at
+ * launcher start and at the end of an install. Play still runs its own check.
+ */
+function warnAboutVisualCppRuntime(root: string): void {
+  void assertVisualCppRuntime(root).catch((error: unknown) => {
+    startupLog.mark("visual-cpp-runtime-refused", errorMessage(error));
+    // Keep an error that is already shown.
+    lastErrorRaw ??= rawErrorMessage(error);
+    void broadcastSnapshot();
+  });
+}
+
+/** Brings the window back: restored, shown, in front. Creates it when it was closed. */
+function showMainWindow(): void {
+  if (!mainWindow) {
+    if (!servicesInitialized) return;
+    quitWhenGameExits = false;
+    quitting = false;
+    mainWindow = createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/** The icon near the clock a hidden window comes back by. False when Windows gave none. */
+function ensureTray(): boolean {
+  if (tray) return true;
+  try {
+    const copy = MAIN_COPY[currentLocale].settings.tray;
+    tray = new Tray(join(app.getAppPath(), app.isPackaged ? "dist" : "public", "branding", "rotk-mark.png"));
+    tray.setToolTip("ROTK Launcher");
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: copy.open, click: showMainWindow },
+      { type: "separator" },
+      // Like closing a window that does not hide: a game that runs keeps its
+      // launcher until it ends (window-all-closed), which app.quit() would skip.
+      { label: copy.quit, click: () => { quitting = true; mainWindow?.close(); } },
+    ]));
+    tray.on("click", showMainWindow);
+    return true;
+  } catch (error) {
+    startupLog.mark("tray-unavailable", error instanceof Error ? error.message : String(error));
+    tray = null;
+    return false;
+  }
+}
+
+/** A Windows notification, for what finishes while the player looks elsewhere. */
+function notify(kind: "installDone" | "updateReady"): void {
+  try {
+    if (!preferences.notifications || mainWindow?.isFocused() || !Notification.isSupported()) return;
+    const copy = MAIN_COPY[currentLocale].settings.notifications[kind];
+    const notification = new Notification({ title: copy.title, body: copy.body });
+    notification.on("click", showMainWindow);
+    notification.show();
+  } catch {
+    // A notification that cannot be shown changes nothing to what it announced.
+  }
+}
+
 async function installationRoot(): Promise<string | null> {
   return (await configStore.load()).installation?.root ?? null;
 }
@@ -340,6 +452,12 @@ async function installationRoot(): Promise<string | null> {
  */
 function activeRuntime(): RuntimeConfig {
   return runtimeConfigFor(selectedServerId);
+}
+
+/** Looks for a launcher release; a no-op while a check runs or an update is already known. */
+function checkLauncherUpdate(): void {
+  launcherUpdateCheckedAt = Date.now();
+  void launcherUpdate.check().catch(() => undefined);
 }
 
 function activeProfile(): LaunchProfileId {
@@ -409,8 +527,8 @@ async function listInstallDrives(): Promise<InstallDrive[]> {
 }
 
 /** Validates a destination and refuses folders holding someone else's files. */
-async function acceptDestination(candidate: string): Promise<string> {
-  const destination = await validateInstallDestination(candidate, sourceRoot ?? undefined);
+async function acceptDestination(candidate: string, source: string | null = sourceRoot): Promise<string> {
+  const destination = await validateInstallDestination(candidate, source ?? undefined);
   assertOutsideLauncherFolder(destination, await installedLauncherFolder());
   if (await inspectDestination(destination) === "foreign") {
     throw new PathPolicyError(
@@ -445,7 +563,7 @@ async function applyRecommendedDestination(): Promise<void> {
     try {
       destinationRoot = await acceptDestination(candidate);
       destinationRecommended = true;
-      phase = "destination-selected";
+      phase = phaseAfterSelection(phase, "destination-selected");
       return;
     } catch {
       // Try the next one; the player can still pick a folder.
@@ -466,18 +584,69 @@ function assetSyncSummary(): AssetSyncSummary {
   };
 }
 
+/** Nothing is being installed, removed, synchronised, launched or played. */
+function launcherIdle(): boolean {
+  return phase === "ready" && !installAbortController && !assetSyncRunning && !gameLauncher.isRunning();
+}
+
+/**
+ * Hashes in the background the archives a launch would otherwise hash while
+ * the player waits. Gives way as soon as the launcher has something else to do.
+ */
+async function warmArchiveDigestCache(): Promise<void> {
+  if (archiveDigestWarmup || !launcherIdle()) return;
+  const root = await installationRoot();
+  if (!root) return;
+  archiveDigestWarmup = true;
+  try {
+    const hashed = await warmArchiveDigests({
+      installationRoot: root,
+      userDataDirectory: app.getPath("userData"),
+      shouldStop: () => !launcherIdle(),
+    });
+    if (hashed > 0) startupLog.mark("archive-digests-warmed", String(hashed));
+  } catch (error) {
+    startupLog.mark("archive-digest-warmup-failed", errorMessage(error));
+  } finally {
+    archiveDigestWarmup = false;
+  }
+}
+
+/**
+ * Does when the launcher opens, and every quarter of an hour after that, what
+ * Play used to start on the click: fetch the asset packs, then hash what
+ * changed. A failure here is silent; Play runs the same steps and reports it.
+ */
+async function prepareLaunch(): Promise<void> {
+  if (!launcherIdle() || backgroundAssetSync || archiveDigestWarmup) return;
+  backgroundAssetSync = runAssetSync("sync", true, true).catch(() => undefined);
+  await backgroundAssetSync;
+  backgroundAssetSync = null;
+  // Asset packs turned off: the pass above did nothing, the game files remain.
+  void warmArchiveDigestCache();
+}
+
+function startLaunchPreparation(): void {
+  void prepareLaunch();
+  setInterval(() => void prepareLaunch(), LAUNCH_PREPARATION_INTERVAL_MS);
+}
+
 /**
  * Synchronize the custom asset packs with the published feed. With `soft`,
  * a failure after at least one completed sync is downgraded to a warning so
  * the feed never prevents the game from launching with the assets on disk.
  */
-async function runAssetSync(mode: "sync" | "verify", soft: boolean): Promise<OperationResult> {
+async function runAssetSync(mode: "sync" | "verify", soft: boolean, unattended = false): Promise<OperationResult> {
   const root = await installationRoot();
   if (!root) return { ok: false, error: MAIN_COPY[currentLocale].clientNotReady };
   if (!assetSyncEnabled) return { ok: true };
+  // A pass the player asks for (Play, verify) waits for the one the launcher
+  // started by itself, then runs its own.
+  if (!unattended) await backgroundAssetSync;
   if (assetSyncRunning) return { ok: false, error: MAIN_COPY[currentLocale].assets.busy };
   assetSyncRunning = true;
-  assetSyncStatus = "checking";
+  // The launcher's own pass stays out of sight until it has a pack to download.
+  if (!unattended) assetSyncStatus = "checking";
   assetSyncWarning = null;
   assetSyncProgress = null;
   await broadcastSnapshot();
@@ -499,199 +668,43 @@ async function runAssetSync(mode: "sync" | "verify", soft: boolean): Promise<Ope
       return { ok: true };
     }
     assetSyncStatus = "error";
+    if (unattended) {
+      // The player asked for nothing: no error banner. Play reports it if it lasts.
+      logOperationError(error);
+      return { ok: false, error: rawErrorMessage(error) };
+    }
     return operationError(error);
   } finally {
     assetSyncRunning = false;
     assetSyncProgress = null;
+    // Packs this pass installed or replaced are hashed now, not at the next Play.
+    void warmArchiveDigestCache();
     await broadcastSnapshot();
   }
 }
 
-/**
- * Runs one integrity attestation pass and returns the block the launch ticket
- * request carries. Returns null only when attestation genuinely cannot run
- * (no policy published, manifest unreachable and never cached) — it is the
- * backend, not the launcher, that decides whether a null is acceptable.
- *
- * A tampered installation still attests: the deviations are reported and the
- * evidence will not match, so the rejection is logged for the admin studio
- * instead of being silently hidden by the client.
- */
-// Ask for a new challenge when less than this is left after hashing.
-const CHALLENGE_MARGIN_MS = 60_000;
-
+/** One integrity attestation pass for this launcher process; see launch-attestation.ts. */
 async function attestInstallation(
   playerKey: string,
   runtime: RuntimeConfig,
 ): Promise<AttestationOutcome> {
-  const root = await installationRoot();
-  const userDataDirectory = app.getPath("userData");
-  const launcherVersion = app.getVersion();
-  // A server that does not run attestation (no policy yet, development
-  // backend) gets the last mode this player was told to use; a fresh machine
-  // starts on the shipped default. Production always uses the signed
-  // challenge directive below.
-  const fallbackMode: GameplayPatchMode =
-    await readCachedGameplayPatchMode(userDataDirectory) ?? "patched";
-  if (!root) return { status: "not-applicable", clientPatchMode: fallbackMode };
-  try {
-    const marker = await readInstallationMarker(root);
-    if (!marker) return { status: "not-applicable", clientPatchMode: fallbackMode };
-
-    let challenge = await requestAttestationChallenge(
-      playerKey,
-      runtime.attestationChallengeUrl,
-      launcherVersion,
-    );
-    // The signed challenge names the client-patch mode this launch must use.
-    // A server that predates the field expects a clean tree, so the safe
-    // default is "clean" rather than silently keeping a local patch.
-    const clientPatchMode: GameplayPatchMode = challenge.clientPatchMode ?? "clean";
-    await applyGameplayPatchMode(
-      root,
-      resolveBundledGameplayPatchPath(),
-      clientPatchMode,
-    );
-    await recordGameplayPatchState(userDataDirectory, {
-      mode: clientPatchMode,
-      dllSha256: clientPatchMode === "patched" ? GAMEPLAY_PATCH_SHA256 : null,
-      markerSha256: clientPatchMode === "patched" ? GAMEPLAY_MARKER_SHA256 : null,
-      policyVersion: challenge.policyVersion,
-    });
-    const baseManifest = await loadBaseManifest({
-      url: BASE_MANIFEST_URL,
-      userDataDirectory,
-      expectedBuildId: challenge.baseBuildId,
-    });
-    const assetState = await assetSync.readState().catch(() => null);
-    const installedAssets = (assetState?.assets ?? []).flatMap((asset) =>
-      asset.installedFiles.map((file) => ({
-        path: file.path,
-        size: file.size,
-        sha256: file.sha256,
-      })));
-    // Files the launcher deliberately replaces or adds: expect its artifacts,
-    // not the vanilla hashes, so they stay attested instead of excluded. Keep
-    // in sync with ATTESTATION_OVERRIDE_PATHS and the policy publisher's
-    // --override flags — a missing entry here flags every honest install.
-    const overrides = await readLauncherOverrides([
-      { installPath: "steam_api64.dll", bundledPath: resolveBundledShimPath() },
-      { installPath: "vivoxsdk_x64.dll", bundledPath: resolveBundledVivoxProxyPath() },
-      { installPath: "vivoxsdk_x64_v5.dll", bundledPath: resolveBundledVivoxRuntimePath() },
-      ...(clientPatchMode === "patched"
-        ? [{ installPath: "dinput8.dll", bundledPath: resolveBundledGameplayPatchPath() }]
-        : []),
-    ]);
-
-    // The fingerprint only needs the slots the challenge names: read it while
-    // the files are hashed instead of after.
-    const hwidSlots = challenge.hwidSlots ?? HWID_CORE_SLOTS;
-    const hwidPromise = collectHwid(hwidSlots).catch(() => ({}));
-    const measurement = await measureInstallation({
-      installationRoot: root,
-      userDataDirectory,
-      expected: mergeExpectedFiles(baseManifest.files, installedAssets, overrides),
-      // Report undeclared .pack2/.dll/.exe dropped into the game tree. Costs
-      // one directory walk; the per-file hashing dominates anyway.
-      detectUnexpected: true,
-      onProgress: (progress) => {
-        attestationProgress = progress.phase === "done" ? null : progress;
-        void broadcastSnapshot();
-      },
-    });
-    attestationProgress = null;
-    if (measurement.deviations.length > 0) {
-      console.warn(
-        `Integrity attestation found ${measurement.deviations.length} deviation(s); reporting them.`,
-      );
-    }
-    // A first launch hashes the whole client and can outlive the challenge.
-    // The measurement does not depend on it, so a fresh one with the same
-    // build, policy, pack and patch mode can be used as is. A failed
-    // renewal keeps the old one, which the server may still accept.
-    if (attestationChallengeRemainingMs(challenge) < CHALLENGE_MARGIN_MS) {
-      const fresh = await requestAttestationChallenge(playerKey, runtime.attestationChallengeUrl, launcherVersion)
-        .catch(() => challenge);
-      if (
-        fresh.baseBuildId === challenge.baseBuildId
-        && fresh.policyVersion === challenge.policyVersion
-        && fresh.packVersion === challenge.packVersion
-        && (fresh.clientPatchMode ?? "clean") === clientPatchMode
-        && JSON.stringify(fresh.hwidSlots ?? HWID_CORE_SLOTS) === JSON.stringify(hwidSlots)
-      ) {
-        challenge = fresh;
-      }
-    }
-    // The fingerprint this launch was asked for (#320 §B): the slots the signed
-    // challenge names, or the core five for a server that names none. Both the
-    // vector and the signing key come from the synthetic identity, rotated per
-    // Play click.
-    const hwid = await hwidPromise;
-    // Sign with the TPM-backed key when the machine has one; null when it does
-    // not, and the launch proceeds without it. The message binds the
-    // (single-use) challengeId to the fingerprint exactly as the ticket will
-    // carry it (#320 §C): neither can be swapped under the other, and the
-    // single-use challenge stops replay. The server decides (behind its own
-    // flag) whether a missing proof is acceptable.
-    const bindingMessage = tpmBindingMessage(challenge.challengeId, hwid);
-    // Both TPM steps sign the same message; run them side by side.
-    const [tpmProof, anchor] = await Promise.all([
-      collectTpmProof(bindingMessage).catch(() => null),
-      collectTpmAnchor(bindingMessage).catch(() => null),
-    ]);
-    // Level-2 anchor (#320 §A): the TPM identity key signs the same message,
-    // and the server is told which endorsement key it lives under — a
-    // credential activation the first time, one confirming request after.
-    // Observe only: a machine without it launches exactly as before.
-    if (anchor !== null) {
-      const enrolment = await enrolTpmAnchor(
-        { beginUrl: runtime.tpmEnrolBeginUrl, completeUrl: runtime.tpmEnrolCompleteUrl },
-        playerKey,
-        launcherVersion,
-        anchor,
-      ).catch(() => null);
-      if (enrolment !== null && enrolment.state !== "activated") {
-        console.warn("TPM anchor not activated", enrolment);
-      }
-    }
-    return {
-      status: "attested",
-      block: buildAttestationResult(challenge, measurement, launcherVersion, tpmProof, anchor?.proof ?? null),
-      hwid,
-      clientPatchMode,
-      measuredCode: measurement.code,
-    };
-  } catch (error) {
-    attestationProgress = null;
-    // A minimum-version rejection is authoritative and must reach the Play
-    // handler so it can lock the button and surface the mandatory updater UI.
-    if (error instanceof Error && "code" in error && error.code === "launcher_update_required") {
-      throw error;
-    }
-    // No policy published / attestation unconfigured: it does not apply, and
-    // the launch proceeds silently exactly as before enforcement existed.
-    if (error instanceof AttestationUnavailableError && error.notApplicable) {
-      await applyGameplayPatchMode(
-        root,
-        resolveBundledGameplayPatchPath(),
-        fallbackMode,
-      ).catch(() => undefined);
-      return { status: "not-applicable", clientPatchMode: fallbackMode };
-    }
-    // A challenge or manifest we could not obtain, or files we could not read:
-    // attestation should have run and did not. Carry the reason so a launch the
-    // backend then blocks can say why, instead of blaming the launcher version.
-    const reason = error instanceof Error && error.message
-      ? error.message.replace(/[.]?\s*$/, ".")
-      : "the integrity service could not be reached.";
-    console.warn("Integrity attestation could not complete", { message: reason });
-    await applyGameplayPatchMode(
-      root,
-      resolveBundledGameplayPatchPath(),
-      fallbackMode,
-    ).catch(() => undefined);
-    return { status: "unavailable", reason, clientPatchMode: fallbackMode };
-  }
+  return runLaunchAttestation(playerKey, runtime, {
+    installationRoot: await installationRoot(),
+    userDataDirectory: app.getPath("userData"),
+    launcherVersion: app.getVersion(),
+    bundled: {
+      gameplayPatch: resolveBundledGameplayPatchPath(),
+      shim: resolveBundledShimPath(),
+      vivoxProxy: resolveBundledVivoxProxyPath(),
+      vivoxRuntime: resolveBundledVivoxRuntimePath(),
+    },
+    readAssetState: () => assetSync.readState(),
+    onMeasureProgress: (progress) => {
+      attestationProgress = progress.phase === "done" ? null : progress;
+      void broadcastSnapshot();
+    },
+    onMeasureEnd: () => { attestationProgress = null; },
+  });
 }
 
 async function snapshot(): Promise<LauncherSnapshot> {
@@ -703,6 +716,10 @@ async function snapshot(): Promise<LauncherSnapshot> {
     selection: { sourceRoot, destinationRoot, sourceKind, sourceDetected, destinationRecommended },
     installationRoot: configuredRoot,
     updates,
+    events,
+    banner,
+    featured,
+    backgrounds,
     runtime: {
       serverId: runtime.id,
       environment: runtime.environment,
@@ -721,6 +738,8 @@ async function snapshot(): Promise<LauncherSnapshot> {
     },
     playerIdentity: identitySummary(),
     launcherUpdate: launcherUpdate.state,
+    launcherUpdateAutoDownload,
+    preferences,
     assetSync: assetSyncSummary(),
     playerFont: { selected: selectedPlayerFont, launcherSelected: selectedLauncherFont, options: playerFontOptions },
     debugSession: diagnostics?.debugState() ?? { enabled: false, status: "idle", fileName: null, error: null },
@@ -736,11 +755,12 @@ async function snapshot(): Promise<LauncherSnapshot> {
     error: lastErrorRaw ? localizeServiceError(lastErrorRaw, currentLocale) : null,
     notice: inputProfileRecovery
       ? MAIN_COPY[currentLocale].inputProfile[inputProfileRecovery.restored ? "restored" : "reset"](inputProfileRecovery.damagedCopy)
-      : null,
+      : startupStallRelaunched ? MAIN_COPY[currentLocale].stopGame.relaunched : null,
     gamePid,
     updateRequired: updateRequired || launcherUpdateBlocksPlay(launcherUpdate.state),
     canPlay:
       phase === "ready"
+      && !installAbortController
       && configuredRoot !== null
       && activeKey() !== null
       && !gameLauncher.isRunning()
@@ -748,6 +768,54 @@ async function snapshot(): Promise<LauncherSnapshot> {
       // A mandatory update blocks Play until a newer launcher is installed.
       && !updateRequired && !launcherUpdateBlocksPlay(launcherUpdate.state),
   };
+}
+
+/**
+ * Reads the publications in the launcher's language. A language switch while
+ * a read is in flight starts another one: the older answer is dropped.
+ */
+async function refreshNews(): Promise<void> {
+  const locale = currentLocale;
+  const latest = await updateFeed.getLatest(locale);
+  if (locale !== currentLocale) return;
+  updates = latest;
+  await broadcastSnapshot();
+}
+
+/**
+ * The line of the home page: the site's open and running competitions, and
+ * what its staff chose to show. A failed read keeps what was shown; a site
+ * that has no choice to give leaves the home page decide.
+ */
+async function refreshEvents(): Promise<void> {
+  try {
+    events = await fetchEvents();
+    await broadcastSnapshot();
+  } catch {
+    // Keeps what was shown.
+  }
+}
+
+/**
+ * What the staff chose on the site for the home page. Read often, so nothing
+ * is published when nothing changed; a hidden or minimized window does not
+ * ask, nor one left open behind a game that runs.
+ */
+async function refreshHomeChoice(): Promise<void> {
+  if (!mainWindow || !mainWindow.isVisible() || mainWindow.isMinimized() || gameLauncher.isRunning()) return;
+  homeChoiceReadAt = Date.now();
+  try {
+    const choice = await fetchHomeChoice();
+    if (JSON.stringify(choice) === JSON.stringify({ banner, featured, backgrounds })) return;
+    // No line yet and a line without a competition are the same: nothing to read again.
+    const eventChanged = (choice.banner?.eventKey ?? null) !== (banner?.eventKey ?? null);
+    ({ banner, featured, backgrounds } = choice);
+    await broadcastSnapshot();
+    // A competition the staff just picked may be newer than the list read 15 minutes ago.
+    if (eventChanged) void refreshEvents();
+  } catch {
+    // The site has no choice to give (or cannot be reached): what was shown stays.
+  }
 }
 
 function statusOf(serverId: ServerId): ServerStatus {
@@ -770,6 +838,9 @@ async function broadcastSnapshot(): Promise<void> {
   // Before the services exist there is no snapshot to build; the renderer's
   // own getSnapshot() call waits for them.
   if (!servicesInitialized) return;
+  // Every change of state ends here, so this is where a windowless launcher
+  // learns that its game, its launch or its report is over.
+  quitIfIdle();
   const value = await snapshot();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(IPC_CHANNELS.snapshotChanged, value);
@@ -826,7 +897,7 @@ function trustedHandler<T extends unknown[], R>(
       // surface only as "System error (EPERM)." with nothing behind it; the
       // channel and stack now land in startup.log so the failing operation
       // is identifiable without a debugger.
-      const channel = (event as { channel?: unknown }).channel;
+      const channel = "channel" in event ? event.channel : undefined;
       startupLog.mark("ipc-failed", `${typeof channel === "string" ? channel : "unknown"}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
       throw error;
     }
@@ -838,7 +909,6 @@ function operationError<T = undefined>(error: unknown): OperationResult<T> {
   lastErrorRaw = rawErrorMessage(error);
   return { ok: false, error: localizeServiceError(lastErrorRaw, currentLocale) };
 }
-
 
 function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.setDebugSessionEnabled, trustedHandler(async (_event, enabled: unknown): Promise<OperationResult<LauncherSnapshot>> => {
@@ -858,7 +928,7 @@ function registerIpc(): void {
     } finally {
       debugSettingWrite = false;
       void broadcastSnapshot();
-      if (quitWhenGameExits && !mainWindow && !gameLauncher.isRunning() && !diagnosticWorkInProgress()) app.quit();
+      quitIfIdle();
     }
     return { ok: true, value: await snapshot() };
   }));
@@ -873,7 +943,7 @@ function registerIpc(): void {
     } catch { return { ok: false, error: diagnosticCopy().failed }; }
     finally {
       crashReportRequests--;
-      if (quitWhenGameExits && !mainWindow && !gameLauncher.isRunning() && phase !== "launching" && phase !== "running" && !diagnosticWorkInProgress()) app.quit();
+      quitIfIdle();
     }
   }));
   ipcMain.handle(IPC_CHANNELS.getDiagnosticReports, trustedHandler(async (): Promise<OperationResult<DiagnosticState>> => {
@@ -929,12 +999,26 @@ function registerIpc(): void {
     } catch { return { ok: false, error: diagnosticCopy().failed }; }
   }));
   ipcMain.handle(IPC_CHANNELS.getSnapshot, trustedHandler(async () => snapshot()));
+  // LOCAL EDIT (diagnostic): one-click VPN/network reachability report.
+  ipcMain.handle(
+    IPC_CHANNELS.networkCheck,
+    trustedHandler(async (): Promise<OperationResult<NetworkCheckReport>> => {
+      try {
+        return { ok: true, value: await runNetworkCheck(activeRuntime()) };
+      } catch (error) {
+        return { ok: false, error: rawErrorMessage(error) };
+      }
+    }),
+  );
   ipcMain.handle(
     IPC_CHANNELS.setLocale,
     trustedHandler(async (_event, locale: unknown) => {
       if (!isAppLocale(locale)) throw new Error("Unsupported launcher locale");
+      const changed = locale !== currentLocale;
       currentLocale = locale;
       await broadcastSnapshot();
+      // The patch notes follow the launcher's language.
+      if (changed) void refreshNews();
     }),
   );
   ipcMain.handle(
@@ -951,6 +1035,9 @@ function registerIpc(): void {
         // Server and role move together: a half-applied selection would launch
         // against one infrastructure with the other one's intent.
         await configStore.setLaunchProfile(serverId, role);
+        // A version refusal belongs to the server that sent it. Leaving that
+        // server frees Play; the other one answers for itself at its next launch.
+        if (serverId !== selectedServerId) updateRequired = false;
         selectedServerId = serverId;
         selectedRole = role;
         lastErrorRaw = null;
@@ -1028,7 +1115,7 @@ function registerIpc(): void {
         sourceDetected = true;
         destinationRoot = null;
         destinationRecommended = false;
-        phase = "source-selected";
+        phase = phaseAfterSelection(phase, "source-selected");
         await applyRecommendedDestination();
         lastErrorRaw = null;
         await broadcastSnapshot();
@@ -1062,14 +1149,15 @@ function registerIpc(): void {
         sourceDetected = false;
         destinationRoot = null;
         destinationRecommended = false;
-        phase = "source-selected";
+        phase = phaseAfterSelection(phase, "source-selected");
         await applyRecommendedDestination();
         lastErrorRaw = null;
         await broadcastSnapshot();
         return { ok: true, value: { sourceRoot } };
       } catch (error) {
+        // A refused folder changes nothing: the phase stays what it was, so a
+        // wrong pick in the settings of an installed launcher keeps Play.
         const result = operationError<{ sourceRoot: string }>(error);
-        phase = "error";
         await broadcastSnapshot();
         return result;
       }
@@ -1097,13 +1185,14 @@ function registerIpc(): void {
           : join(parent, ROTK_INSTALL_DIRECTORY_NAME);
         destinationRoot = await acceptDestination(candidate);
         destinationRecommended = false;
-        phase = "destination-selected";
+        phase = phaseAfterSelection(phase, "destination-selected");
         lastErrorRaw = null;
         await broadcastSnapshot();
         return { ok: true, value: { destinationRoot } };
       } catch (error) {
+        // A refused folder changes nothing: the phase stays what it was, so a
+        // wrong pick in the settings of an installed launcher keeps Play.
         const result = operationError<{ destinationRoot: string }>(error);
-        phase = "error";
         await broadcastSnapshot();
         return result;
       }
@@ -1127,7 +1216,8 @@ function registerIpc(): void {
     trustedHandler(async () => {
       // The renderer shows an error before a notice: close them in that order.
       if (lastErrorRaw !== null) lastErrorRaw = null;
-      else inputProfileRecovery = null;
+      else if (inputProfileRecovery) inputProfileRecovery = null;
+      else startupStallRelaunched = false;
       await broadcastSnapshot();
     }),
   );
@@ -1150,7 +1240,7 @@ function registerIpc(): void {
       try {
         destinationRoot = await acceptDestination(destinationOnDrive(root));
         destinationRecommended = false;
-        phase = "destination-selected";
+        phase = phaseAfterSelection(phase, "destination-selected");
         lastErrorRaw = null;
         await broadcastSnapshot();
         return { ok: true, value: { destinationRoot } };
@@ -1160,93 +1250,210 @@ function registerIpc(): void {
     }),
   );
 
+  // Installs, resumes or repairs with the current selection: the install
+  // button and the repair of the settings share it.
+  const runInstall = async (): Promise<OperationResult<{ installationRoot: string }>> => {
+    const copy = MAIN_COPY[currentLocale];
+    if (!sourceRoot || !sourceKind) return { ok: false, error: copy.selectSourceFirst };
+    if (sourceKind === "copy-required" && !destinationRoot) return { ok: false, error: copy.selectBoth };
+    if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
+      return { ok: false, error: copy.clientInUse };
+    }
+    if (installAbortController) return { ok: false, error: MAIN_COPY[currentLocale].installationInProgress };
+    installAbortController = new AbortController();
+    phase = "installing";
+    progress = null;
+    lastErrorRaw = null;
+    await broadcastSnapshot();
+    try {
+      const onProgress = (nextProgress: NonNullable<LauncherSnapshot["progress"]>): void => {
+        progress = nextProgress;
+        void broadcastSnapshot();
+      };
+      const installationRoot = sourceKind === "direct"
+        ? sourceRoot
+        : destinationRoot as string;
+      const launcherFolder = await installedLauncherFolder();
+      let marker: Awaited<ReturnType<typeof installClient>>;
+      if (sourceKind === "direct") {
+        marker = await adoptExistingClient({
+          root: sourceRoot,
+          shimPath: resolveBundledShimPath(),
+          vivoxProxyPath: resolveBundledVivoxProxyPath(),
+          vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
+          launcherVersion: app.getVersion(),
+          launcherFolder,
+          onProgress,
+        });
+      } else {
+        // Best-effort: only lets the copy resume after a restart.
+        await configStore.setPendingInstallRoot(installationRoot).catch(() => undefined);
+        marker = await installClient({
+          sourceRoot,
+          destinationRoot: installationRoot,
+          shimPath: resolveBundledShimPath(),
+          vivoxProxyPath: resolveBundledVivoxProxyPath(),
+          vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
+          launcherVersion: app.getVersion(),
+          launcherFolder,
+          signal: installAbortController.signal,
+          onProgress,
+        });
+      }
+      await configStore.setInstallation({
+        installId: marker.installId,
+        clientBuildId: marker.clientBuildId,
+        root: installationRoot,
+        sourceRoot,
+        installedAt: marker.installedAt,
+        criticalHashes: marker.criticalHashes,
+      });
+      phase = "ready";
+      progress = null;
+      await broadcastSnapshot();
+      notify("installDone");
+      warnAboutVisualCppRuntime(installationRoot);
+      // Best-effort first asset sync: a feed problem surfaces in the asset
+      // summary without turning the completed installation into a failure.
+      await runAssetSync("sync", true);
+      return { ok: true, value: { installationRoot } };
+    } catch (error) {
+      const cancelled = installAbortController.signal.aborted;
+      let result: OperationResult<{ installationRoot: string }>;
+      if (cancelled) {
+        lastErrorRaw = null;
+        result = { ok: false, cancelled: true };
+      } else {
+        result = operationError<{ installationRoot: string }>(error);
+      }
+      // The copy resumes on the next attempt, so the selection stays. A client
+      // that was already installed before this attempt stays playable.
+      phase = await installationRoot().catch(() => null)
+        ? "ready"
+        : sourceKind === "copy-required" ? "destination-selected" : "source-selected";
+      progress = null;
+      await broadcastSnapshot();
+      return result;
+    } finally {
+      installAbortController = null;
+      // The first asset pass ended under the lock: hash now what it installed.
+      void warmArchiveDigestCache();
+    }
+  };
+  ipcMain.handle(IPC_CHANNELS.install, trustedHandler(runInstall));
+
   ipcMain.handle(
-    IPC_CHANNELS.install,
+    IPC_CHANNELS.repairGame,
     trustedHandler(async (): Promise<OperationResult<{ installationRoot: string }>> => {
       const copy = MAIN_COPY[currentLocale];
-      if (!sourceRoot || !sourceKind) return { ok: false, error: copy.selectSourceFirst };
-      if (sourceKind === "copy-required" && !destinationRoot) return { ok: false, error: copy.selectBoth };
+      const installation = (await configStore.load()).installation;
+      if (!installation) return { ok: false, error: copy.settings.notInstalled };
       if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
         return { ok: false, error: copy.clientInUse };
       }
-      if (installAbortController) return { ok: false, error: MAIN_COPY[currentLocale].installationInProgress };
-      installAbortController = new AbortController();
-      phase = "installing";
-      progress = null;
-      lastErrorRaw = null;
-      await broadcastSnapshot();
+      if (installAbortController) return { ok: false, error: copy.installationInProgress };
+      if (assetSyncRunning) return { ok: false, error: copy.assets.busy };
       try {
-        const onProgress = (nextProgress: NonNullable<LauncherSnapshot["progress"]>): void => {
-          progress = nextProgress;
-          void broadcastSnapshot();
-        };
-        const installationRoot = sourceKind === "direct"
-          ? sourceRoot
-          : destinationRoot as string;
-        const launcherFolder = await installedLauncherFolder();
-        let marker: Awaited<ReturnType<typeof installClient>>;
-        if (sourceKind === "direct") {
-          marker = await adoptExistingClient({
-            root: sourceRoot,
-            shimPath: resolveBundledShimPath(),
-            vivoxProxyPath: resolveBundledVivoxProxyPath(),
-            vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
-            launcherVersion: app.getVersion(),
-            launcherFolder,
-            onProgress,
-          });
-        } else {
-          // Best-effort: only lets the copy resume after a restart.
-          await configStore.setPendingInstallRoot(installationRoot).catch(() => undefined);
-          marker = await installClient({
-            sourceRoot,
-            destinationRoot: installationRoot,
-            shimPath: resolveBundledShimPath(),
-            vivoxProxyPath: resolveBundledVivoxProxyPath(),
-            vivoxRuntimePath: resolveBundledVivoxRuntimePath(),
-            launcherVersion: app.getVersion(),
-            launcherFolder,
-            signal: installAbortController.signal,
-            onProgress,
-          });
-        }
-        await configStore.setInstallation({
-          installId: marker.installId,
-          clientBuildId: marker.clientBuildId,
-          root: installationRoot,
-          sourceRoot,
-          installedAt: marker.installedAt,
-          criticalHashes: marker.criticalHashes,
-        });
-        phase = "ready";
-        progress = null;
-        await broadcastSnapshot();
-        // Best-effort first asset sync: a feed problem surfaces in the asset
-        // summary without turning the completed installation into a failure.
-        await runAssetSync("sync", true);
-        return { ok: true, value: { installationRoot } };
+        // The H1Z1 this installation was copied from. A client adopted where
+        // it stood is its own source: there is nothing to repair it from.
+        const source = await classifyClientSource(installation.sourceRoot, await installedLauncherFolder());
+        if (source.kind !== "copy-required") return { ok: false, error: copy.settings.repairNoSource };
+        // The selection changes once both folders are accepted: a refusal leaves it as it was.
+        const destination = await acceptDestination(installation.root, source.root);
+        sourceRoot = source.root;
+        sourceKind = source.kind;
+        sourceDetected = false;
+        destinationRoot = destination;
+        destinationRecommended = false;
       } catch (error) {
-        const cancelled = installAbortController.signal.aborted;
-        let result: OperationResult<{ installationRoot: string }>;
-        if (cancelled) {
-          lastErrorRaw = null;
-          result = { ok: false, cancelled: true };
-        } else {
-          result = operationError<{ installationRoot: string }>(error);
-        }
-        // The copy resumes on the next attempt, so the selection stays. A client
-        // that was already installed before this attempt stays playable.
-        phase = await installationRoot().catch(() => null)
-          ? "ready"
-          : sourceKind === "copy-required" ? "destination-selected" : "source-selected";
-        progress = null;
+        return operationError(error);
+      }
+      // Installing onto a finished ROTK client repairs it (see installClient).
+      return runInstall();
+    }),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.uninstallGame,
+    trustedHandler(async (): Promise<OperationResult> => {
+      const copy = MAIN_COPY[currentLocale];
+      const installation = (await configStore.load()).installation;
+      if (!installation) return { ok: false, error: copy.settings.notInstalled };
+      if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
+        return { ok: false, error: copy.clientInUse };
+      }
+      if (installAbortController) return { ok: false, error: copy.installationInProgress };
+      if (assetSyncRunning) return { ok: false, error: copy.assets.busy };
+      // Held until the folder is gone: Play, a repair, a file check, a second
+      // click and the launcher's own pass would write into what is being deleted.
+      installAbortController = new AbortController();
+      // The window asked the player; what may be deleted is decided here, by removeInstallation.
+      try {
         await broadcastSnapshot();
-        return result;
+        // A game left open by an earlier launcher session: isRunning() cannot see it.
+        const free = await assertExecutableNotRunning(join(installation.root, "H1Z1.exe")).then(() => true, () => false);
+        if (!free) return { ok: false, error: copy.clientInUse };
+        await removeInstallation(installation, await installedLauncherFolder(), assetStorageFor(installation.root));
+        await configStore.clearInstallation();
+        sourceRoot = null;
+        destinationRoot = null;
+        sourceKind = null;
+        sourceDetected = false;
+        destinationRecommended = false;
+        phase = "unconfigured";
+        lastErrorRaw = null;
+        assetSyncPackVersion = null;
+        assetSyncProgress = null;
+        assetSyncWarning = null;
+        assetSyncStatus = assetSyncEnabled ? "idle" : "disabled";
+        return { ok: true };
+      } catch (error) {
+        return operationError(error);
       } finally {
         installAbortController = null;
+        await broadcastSnapshot();
       }
     }),
   );
+
+  ipcMain.handle(
+    IPC_CHANNELS.setPreferences,
+    trustedHandler(async (_event, value: unknown): Promise<OperationResult> => {
+      const changed = readPreferences(value);
+      if (!changed) throw new Error("Unsupported launcher preference");
+      await configStore.setPreferences(changed);
+      preferences = { ...preferences, ...changed };
+      await broadcastSnapshot();
+      return { ok: true };
+    }),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.openInstallFolder, trustedHandler(async (): Promise<OperationResult> => {
+    const root = await installationRoot();
+    // openPath answers with an error text, empty when the folder opened.
+    const failure = root ? await shell.openPath(root) : "not installed";
+    return failure ? { ok: false, error: MAIN_COPY[currentLocale].settings.folderUnavailable } : { ok: true };
+  }));
+  ipcMain.handle(IPC_CHANNELS.openLogsFolder, trustedHandler(async (): Promise<OperationResult> => {
+    // The folder of startup.log, the file the team asks for, with it selected.
+    shell.showItemInFolder(join(app.getPath("userData"), STARTUP_LOG_NAME));
+    return { ok: true };
+  }));
+  ipcMain.handle(IPC_CHANNELS.openDiscord, trustedHandler(async (): Promise<OperationResult> => {
+    try {
+      await shell.openExternal(DISCORD_INVITE_URL);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: MAIN_COPY[currentLocale].settings.linkUnavailable };
+    }
+  }));
+  ipcMain.handle(IPC_CHANNELS.getInstallInfo, trustedHandler(async (): Promise<OperationResult<{ bytes: number; adopted: boolean }>> => {
+    const installation = (await configStore.load()).installation;
+    if (!installation) return { ok: false, error: MAIN_COPY[currentLocale].settings.notInstalled };
+    const { root } = installation;
+    const marker = await readInstallationMarker(root).catch(() => null);
+    return { ok: true, value: { bytes: await folderSize(root), adopted: marker !== null && adoptedInPlace(marker, root, installation.sourceRoot) } };
+  }));
 
   ipcMain.handle(
     IPC_CHANNELS.cancelInstall,
@@ -1254,25 +1461,36 @@ function registerIpc(): void {
       installAbortController?.abort(new DOMException("Installation cancelled", "AbortError"));
     }),
   );
-  // LOCAL EDIT (diagnostic): one-click VPN/network reachability report.
-  ipcMain.handle(
-    IPC_CHANNELS.networkCheck,
-    trustedHandler(async (): Promise<OperationResult<NetworkCheckReport>> => {
-      try {
-        return { ok: true, value: await runNetworkCheck(activeRuntime()) };
-      } catch (error) {
-        return { ok: false, error: rawErrorMessage(error) };
-      }
-    }),
-  );
 
-  ipcMain.handle(
-    IPC_CHANNELS.play,
-    trustedHandler(async (): Promise<OperationResult<{ pid: number }>> => {
+  // Some launches freeze before H1Z1 opens its window (no output after its
+  // startup settings) and only a relaunch helps. ACD (11/11): closing a game
+  // that never reached the lobby is fine. Bounded per Play click.
+  const STARTUP_STALL_RELAUNCHES = 2;
+  let stallRelaunchesLeft = 0;
+  const relaunchAfterStall = async (): Promise<void> => {
+    // The stalled session's report is finalized before Play is accepted again.
+    for (let waited = 0; diagnosticWorkInProgress() && waited < 60_000; waited += 500) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+    }
+    const result = await play(true).catch((error: unknown) => operationError<{ pid: number }>(error));
+    if (result.ok) return;
+    // Refused before it started (update required, key removed…): Play is free
+    // again, and nobody is waiting on the answer but the window.
+    if (phase === "launching" && !gameLauncher.isRunning()) phase = "ready";
+    startupStallRelaunched = false;
+    if (!result.cancelled) lastErrorRaw ??= result.error ?? null;
+    await broadcastSnapshot();
+    if (quitWhenGameExits && !mainWindow && !gameLauncher.isRunning() && !diagnosticWorkInProgress()) app.quit();
+  };
+  const play = async (relaunch: boolean): Promise<OperationResult<{ pid: number }>> => {
       if (updateRequired || launcherUpdateBlocksPlay(launcherUpdate.state)) {
         return { ok: false, error: MAIN_COPY[currentLocale].update.required };
       }
-      if (phase !== "ready" || debugSettingWrite || diagnosticWorkInProgress()) return { ok: false, error: MAIN_COPY[currentLocale].clientNotReady };
+      // A relaunch after a stalled start keeps "launching" while it waits.
+      if (phase !== (relaunch ? "launching" : "ready") || installAbortController || debugSettingWrite || diagnosticWorkInProgress()) {
+        if (relaunch) phase = "ready";
+        return { ok: false, error: MAIN_COPY[currentLocale].clientNotReady };
+      }
       const selectedKey = activeKey();
       if (!selectedKey) {
         return {
@@ -1287,12 +1505,14 @@ function registerIpc(): void {
       const launchCredential = identityFromPlayerKey(selectedKey);
       const launchRuntime = activeRuntime();
       phase = "launching";
-      // One synthetic machine identity per Play click: the HWID vector and the
-      // signing key are both replaced before attestation runs, so nothing from
-      // a previous launch survives to be correlated.
-      rotateIdentity();
       lastErrorRaw = null;
-      inputProfileRecovery = null;
+      // Per accepted Play click: a refused click cannot refill the relaunches,
+      // and a relaunch keeps the notice its first start raised.
+      if (!relaunch) {
+        inputProfileRecovery = null;
+        stallRelaunchesLeft = STARTUP_STALL_RELAUNCHES;
+        startupStallRelaunched = false;
+      }
       await broadcastSnapshot();
       // A discovered update must be fully downloaded and installed before
       // starting the game; launching with a partially updated asset set is unsafe.
@@ -1303,9 +1523,14 @@ function registerIpc(): void {
         return { ok: false, error: assetResult.error };
       }
       let diagnosticLaunch: Awaited<ReturnType<DiagnosticController["beginLaunch"]>> | undefined;
+      let stalled = false;
       try {
         try { diagnosticLaunch = await diagnostics.beginLaunch(await diagnosticContext(launchRuntime)); }
         catch { /* A report directory failure cannot block an otherwise valid game launch. */ }
+        // One synthetic machine identity per Play click: the HWID vector and the
+        // signing key are both replaced before attestation runs, so nothing from
+        // a previous launch survives to be correlated.
+        rotateIdentity();
         const pid = await gameLauncher.launch({
           config: await configStore.load(),
           identity: launchCredential,
@@ -1326,33 +1551,55 @@ function registerIpc(): void {
           presence: discordPresence,
           // Shown by the snapshot that onExit broadcasts right after.
           onEarlyExit: (message) => { lastErrorRaw = message; },
-          // Best-effort hardware fingerprint for a launch that could not
-          // attest; a failure degrades to no HWID signal, never a blocked launch.
+          // Best-effort hardware fingerprint; the server hashes it. A failure
+          // must never block a launch, so it degrades to no HWID signal.
           fallbackHwid: () => collectHwid(),
           onInputProfileRecovered: (recovery) => {
             inputProfileRecovery = recovery;
             void broadcastSnapshot();
           },
+          onStartupStalled: () => {
+            if (!gameLauncher.stop()) return;
+            stalled = true;
+            startupLog.mark("game-startup-stalled", `no startup line after ${GAME_STARTUP_STALL_MS / 1000} s, closed, ${stallRelaunchesLeft} relaunch(es) left`);
+          },
           onExit: () => {
             gamePid = null;
             phase = "ready";
+            if (stalled) {
+              if (stallRelaunchesLeft > 0) {
+                stallRelaunchesLeft -= 1;
+                phase = "launching";
+                // Not the exit code of a game the launcher closed itself.
+                lastErrorRaw = null;
+                startupStallRelaunched = true;
+                void broadcastSnapshot();
+                void relaunchAfterStall();
+                return;
+              }
+              startupStallRelaunched = false;
+              lastErrorRaw = MAIN_COPY[currentLocale].stopGame.stalled;
+            }
             void broadcastSnapshot();
-            if (quitWhenGameExits && !mainWindow && !diagnosticWorkInProgress()) app.quit();
           },
         });
         gamePid = pid;
         phase = "running";
         await broadcastSnapshot();
+        // The player's choice for a started game. A closed window keeps its
+        // process until the game ends, like one the player closes by hand.
+        if (preferences.gameStartBehavior === "minimize") mainWindow?.minimize();
+        else if (preferences.gameStartBehavior === "close") mainWindow?.close();
         return { ok: true, value: { pid } };
       } catch (error) {
         if (diagnosticLaunch) await diagnostics.launchFailed(diagnosticLaunch.id, error).catch(() => undefined);
         const result = operationError<{ pid: number }>(error);
-        // A version refusal is authoritative: block Play until a newer
-        // launcher is installed. This build's updater is disabled, so the
-        // check reports idle and the modal only states that the server
-        // requires a newer launcher. Any other failure stays retryable, so it
-        // must not set the flag.
-        if (error instanceof Error && "code" in error && error.code === "launcher_update_required") {
+        // A version refusal makes the update mandatory: block Play, and CHECK
+        // for the update (metadata only — autoDownload is false) so the modal
+        // can show that a new version exists. Nothing is downloaded here; the
+        // installer is fetched only when the player consents via the update
+        // action. Any other failure stays retryable, so it must not set the flag.
+        if ((error as { code?: string })?.code === "launcher_update_required") {
           updateRequired = true;
           void launcherUpdate.check().catch(() => undefined);
         }
@@ -1375,11 +1622,11 @@ function registerIpc(): void {
           outcome = { ok: false, error: free ? copy.strayClosed : copy.strayNotClosed };
           await broadcastSnapshot();
         }
-        if (quitWhenGameExits && !mainWindow && !diagnosticWorkInProgress()) app.quit();
+        quitIfIdle();
         return outcome;
       }
-    }),
-  );
+  };
+  ipcMain.handle(IPC_CHANNELS.play, trustedHandler(() => play(false)));
 
   ipcMain.handle(
     IPC_CHANNELS.stopGame,
@@ -1430,14 +1677,33 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.setLauncherUpdateAutoDownload,
+    trustedHandler(async (_event, enabled: unknown): Promise<OperationResult> => {
+      if (typeof enabled !== "boolean") throw new Error("Unsupported launcher update setting");
+      await configStore.setLauncherUpdateAutoDownload(enabled);
+      launcherUpdateAutoDownload = enabled;
+      await broadcastSnapshot();
+      // Turned on with an update already found: it starts now.
+      void launcherUpdate.check();
+      return { ok: true };
+    }),
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.installLauncherUpdate,
     trustedHandler(async (): Promise<OperationResult> => {
       if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
         return { ok: false, error: MAIN_COPY[currentLocale].update.gameRunning };
       }
       if (installAbortController) return { ok: false, error: MAIN_COPY[currentLocale].installationInProgress };
+      // The launcher quits for the installer whatever happens to it next: keep
+      // a trace, so the next start can tell when the update did not install.
+      const state = launcherUpdate.state;
+      const target = state.status === "downloaded" ? state.availableVersion : null;
+      if (target) await recordUpdateAttempt(app.getPath("userData"), app.getVersion(), target).catch(() => undefined);
       const failure = launcherUpdate.install();
       if (!failure) return { ok: true };
+      if (target) await clearUpdateAttempt(app.getPath("userData")).catch(() => undefined);
       return { ok: false, error: MAIN_COPY[currentLocale].update[failure] };
     }),
   );
@@ -1449,7 +1715,7 @@ function registerIpc(): void {
       if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
         return { ok: false, error: copy.clientInUse };
       }
-      if (phase === "installing") return { ok: false, error: copy.installationInProgress };
+      if (installAbortController) return { ok: false, error: copy.installationInProgress };
       if (!assetSyncEnabled) return { ok: false, error: copy.assets.disabled };
       return runAssetSync("verify", false);
     }),
@@ -1462,7 +1728,7 @@ function registerIpc(): void {
       if (gameLauncher.isRunning() || phase === "launching" || phase === "running") {
         return { ok: false, error: copy.clientInUse };
       }
-      if (phase === "installing") return { ok: false, error: copy.installationInProgress };
+      if (installAbortController) return { ok: false, error: copy.installationInProgress };
       if (assetSyncRunning) return { ok: false, error: copy.assets.busy };
       const root = await installationRoot();
       if (!root) return { ok: false, error: copy.clientNotReady };
@@ -1575,34 +1841,80 @@ function createWindow(): BrowserWindow {
   window.once("ready-to-show", () => showOnce("ready-to-show"));
   window.webContents.once("did-finish-load", () => showOnce("did-finish-load"));
   const showDeadline = setTimeout(() => showOnce("deadline"), WINDOW_SHOW_DEADLINE_MS);
+  // The page is always the one this process builds the path of, on the first
+  // load and when it is loaded again after a failure.
+  const loadPage = (): void => {
+    if (window.isDestroyed()) return;
+    const devServer = process.env.VITE_DEV_SERVER_URL;
+    // A failed load is reported through did-fail-load below.
+    if (devServer && !app.isPackaged) void window.loadURL(devServer).catch(() => undefined);
+    else void window.loadFile(join(app.getAppPath(), "dist", "index.html")).catch(() => undefined);
+  };
+  // A page that crashes or cannot load leaves a window with nothing in it,
+  // and this window has no frame: not even a button to close it. Load the
+  // page again; when that keeps failing (2.0.14: "Renderer process
+  // launch-failed"), say so once and close the window. A running game keeps
+  // its launcher: window-all-closed holds the process until the game ends, and
+  // starting the launcher again opens a new window.
+  const pageFailures: number[] = [];
+  const recoverPage = (reason: string, detail: string): void => {
+    if (window.isDestroyed()) return;
+    const now = Date.now();
+    while (pageFailures.length > 0 && now - pageFailures[0] > WINDOW_FAILURE_MEMORY_MS) pageFailures.shift();
+    const recovery = windowRecovery(reason, pageFailures.length);
+    if (recovery === "ignore") return;
+    pageFailures.push(now);
+    if (recovery === "reload") {
+      startupLog.mark("window-page-reloaded", detail);
+      setTimeout(loadPage, 300);
+      return;
+    }
+    startupLog.mark("window-closed-after-failure", detail);
+    void diagnostics?.recordLauncherError("launcher_renderer_gone", new Error(detail)).catch(() => undefined);
+    const copy = MAIN_COPY[currentLocale];
+    dialog.showErrorBox(copy.startupTitle, `${copy.rendererGone(detail)}\n\n${copy.startupSafety}`);
+    window.destroy();
+  };
   window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
     // -3 (ABORTED) is a navigation replaced by another, not a failed page.
     if (!isMainFrame || errorCode === -3) return;
     startupLog.mark("did-fail-load", `${errorCode} ${errorDescription}`);
-    showOnce("did-fail-load");
+    recoverPage("load-failed", `load-failed ${errorCode} ${errorDescription}`);
   });
-  // A renderer that cannot start (2.0.14: "Renderer process launch-failed") or
-  // crashes leaves a window with nothing in it. Say so once and leave the
-  // decision to the player: quitting here would take a running game's launcher
-  // away with it.
-  let rendererFailureReported = false;
   window.webContents.on("render-process-gone", (_event, details) => {
     startupLog.mark("render-process-gone", `${details.reason} exitCode=${details.exitCode}`);
-    if (details.reason === "clean-exit" || rendererFailureReported) return;
-    rendererFailureReported = true;
-    void diagnostics?.recordLauncherError("launcher_renderer_gone", new Error(details.reason)).catch(() => undefined);
-    const copy = MAIN_COPY[currentLocale];
-    dialog.showErrorBox(copy.startupTitle, `${copy.rendererGone(details.reason)}\n\n${copy.startupSafety}`);
+    recoverPage(details.reason, `${details.reason} exitCode=${details.exitCode}`);
+  });
+  // A page that stops answering is only logged: it may come back by itself.
+  window.on("unresponsive", () => startupLog.mark("window-unresponsive"));
+  window.on("responsive", () => startupLog.mark("window-responsive"));
+  // "Keep it near the clock": closing hides the window and an icon brings it
+  // back. Quitting for real (that icon's menu, an update, Windows shutting
+  // down) goes through, and so does a close without an icon to come back by.
+  window.on("close", (event) => {
+    if (quitting || preferences.closeBehavior !== "tray" || !ensureTray()) return;
+    event.preventDefault();
+    window.hide();
+  });
+  window.on("session-end", () => { quitting = true; });
+  window.on("show", () => {
+    tray?.destroy();
+    tray = null;
   });
   window.on("closed", () => {
     clearTimeout(showDeadline);
     if (mainWindow === window) mainWindow = null;
+    tray?.destroy();
+    tray = null;
+  });
+  // Back on the launcher: the moment a player expects to see what is new.
+  window.on("focus", () => {
+    if (servicesInitialized && Date.now() - launcherUpdateCheckedAt >= LAUNCHER_UPDATE_FOCUS_GAP_MS) checkLauncherUpdate();
+    if (servicesInitialized && Date.now() - homeChoiceReadAt >= HOME_CHOICE_FOCUS_GAP_MS) void refreshHomeChoice();
   });
   Menu.setApplicationMenu(null);
 
-  const devServer = process.env.VITE_DEV_SERVER_URL;
-  if (devServer && !app.isPackaged) void window.loadURL(devServer);
-  else void window.loadFile(join(app.getAppPath(), "dist", "index.html"));
+  loadPage();
   return window;
 }
 
@@ -1635,6 +1947,7 @@ async function initialize(): Promise<void> {
         return false;
       }
     },
+    (fields) => startupLog.mark("config-fields-ignored", fields.join(",")),
   );
   playerKeyStore = new PlayerKeyStore(
     join(app.getPath("userData"), "player-keys.v2.json"),
@@ -1645,11 +1958,17 @@ async function initialize(): Promise<void> {
     },
     join(app.getPath("userData"), "player-key.v1.json"),
   );
-  playerKeys = await playerKeyStore.load();
+  // A file held by an antivirus or a sync tool used to close the launcher
+  // with an error box; the window is up, so wait for it instead.
+  playerKeys = await readWhenFree(() => playerKeyStore.load(), {
+    onWait: (code) => startupLog.mark("player-keys-held", code),
+  });
   startupLog.mark("player-keys-loaded");
   updateFeed = new UpdateFeedService(app.getPath("userData"));
   assetSync = new AssetSyncService({
     userDataDirectory: app.getPath("userData"),
+    onFeedUnavailable: (reason) => startupLog.mark("asset-feed-unavailable", reason),
+    downloadSpeedLimit: () => preferences.downloadSpeedLimit * 1024 * 1024,
     onProgress: (value) => {
       assetSyncStatus = value.phase === "checking"
         ? "checking"
@@ -1658,9 +1977,13 @@ async function initialize(): Promise<void> {
       void broadcastSnapshot();
     },
   });
-  const config = await configStore.load();
+  const config = await readWhenFree(() => configStore.load(), {
+    onWait: (code) => startupLog.mark("config-held", code),
+  });
   startupLog.mark("config-loaded");
   assetSyncEnabled = config.assetSyncEnabled ?? true;
+  launcherUpdateAutoDownload = config.launcherUpdateAutoDownload ?? false;
+  preferences = { ...DEFAULT_PREFERENCES, ...storedPreferences(config.preferences) };
   selectedServerId = config.serverId ?? DEFAULT_SERVER_ID;
   selectedRole = config.role ?? DEFAULT_PLAYER_ROLE;
   // A missing font bundle only hides the font choice; Play keeps the fonts as they are.
@@ -1671,6 +1994,14 @@ async function initialize(): Promise<void> {
   const assetState = await assetSync.readState().catch(() => null);
   assetSyncPackVersion = assetState?.packVersion ?? null;
   assetSyncLastAt = assetState?.syncedAt ?? null;
+  // An update that was downloaded and started, yet this is still the version
+  // that started it: its installer did not run. Say so instead of offering the
+  // same update again with no explanation.
+  const notInstalled = await failedUpdateAttempt(app.getPath("userData"), app.getVersion()).catch(() => null);
+  if (notInstalled) {
+    startupLog.mark("launcher-update-not-installed", notInstalled);
+    lastErrorRaw = MAIN_COPY[currentLocale].update.notInstalled(notInstalled);
+  }
   if (config.installation) {
     phase = "ready";
     try {
@@ -1695,6 +2026,7 @@ async function initialize(): Promise<void> {
   }
   if (config.installation && phase === "ready") {
     void cleanupInstallLeftovers(config.installation.root).catch(() => undefined);
+    warnAboutVisualCppRuntime(config.installation.root);
   }
   launcherUpdate = new LauncherUpdateService({
     // LOCAL EDIT: self-update is disabled in this fork; newer builds are
@@ -1706,6 +2038,7 @@ async function initialize(): Promise<void> {
     updater: null,
     onChange: () => void broadcastSnapshot(),
     onDownloadError: (code) => startupLog.mark("launcher-update-failed", code),
+    onCheckError: (code) => startupLog.mark("launcher-update-check-failed", code),
   });
   diagnostics = new DiagnosticController({ directory: join(app.getPath("userData"), "diagnostics"),
     helperPath: resolveBundledDiagnosticsPath(), knownSecrets: () => Object.values(playerKeys).filter((key): key is string => typeof key === "string"),
@@ -1725,7 +2058,9 @@ async function initialize(): Promise<void> {
       debugSettingWrite = true;
       void configStore.load().then((config) => configStore.save({ ...config, debugSessionEnabled: false }))
         .catch((error: unknown) => startupLog.mark("debug-setting-save-failed", errorMessage(error)))
-        .finally(() => { debugSettingWrite = false; });
+        // The saved setting frees Play and may be the last thing a windowless
+        // launcher was waiting for: say so, which also applies the quit rule.
+        .finally(() => { debugSettingWrite = false; void broadcastSnapshot(); });
     },
     // The player sees the reason; startup.log keeps the error behind it.
     onDebugFailure: (code, reason, error) => startupLog.mark(code, redactDiagnosticText([reason,
@@ -1737,28 +2072,28 @@ async function initialize(): Promise<void> {
   servicesInitialized = true;
   resolveServicesReady();
   startupLog.mark("services-ready");
-  updates = await updateFeed.getLatest();
+  await refreshNews();
+  void refreshEvents();
+  void refreshHomeChoice();
   await broadcastSnapshot();
-  void launcherUpdate.check();
-  setInterval(() => void launcherUpdate.check(), LAUNCHER_UPDATE_CHECK_INTERVAL_MS);
+  checkLauncherUpdate();
+  setInterval(checkLauncherUpdate, LAUNCHER_UPDATE_CHECK_INTERVAL_MS);
   void refreshServerStatus();
   setInterval(() => void refreshServerStatus(), SERVER_STATUS_POLL_INTERVAL_MS);
+  // A patch note published while the launcher is open shows up without a restart.
+  setInterval(() => void refreshNews().catch(() => undefined), NEWS_REFRESH_INTERVAL_MS);
+  setInterval(() => void refreshEvents(), NEWS_REFRESH_INTERVAL_MS);
+  setInterval(() => void refreshHomeChoice(), HOME_CHOICE_INTERVAL_MS);
 }
 
 if (singleInstanceLock) {
   app.on("second-instance", () => {
-    if (!mainWindow) {
-      // Still starting: the window is on its way.
-      if (!servicesInitialized) return;
-      // The window was closed while the game ran (window-all-closed keeps the
-      // process alive for it): give it back instead of ignoring the click.
-      quitWhenGameExits = false;
-      mainWindow = createWindow();
-      return;
-    }
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    // Still starting: the window is on its way. Closed while the game ran
+    // (window-all-closed keeps the process alive for it) or hidden near the
+    // clock: give it back instead of ignoring the click.
+    showMainWindow();
   });
+  app.on("before-quit", () => { quitting = true; });
 
   // GPU, utility and renderer children that end abnormally, with the reason
   // Chromium gives (2.0.14: GPU "launch-failed" six times, then the abort).
@@ -1773,13 +2108,14 @@ if (singleInstanceLock) {
     .whenReady()
     .then(async () => {
       // LOCAL EDIT (fork): never require administrator rights or show a UAC
-      // prompt. Upstream 2.0.28 gates startup behind an elevated relaunch
+      // prompt. Upstream gates startup behind an elevated relaunch
       // (startWithRequiredElevation); this per-user (asInvoker) build
       // initializes in-process on whatever token the player launched with.
       session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
       session.defaultSession.setPermissionCheckHandler(() => false);
       startupLog.mark("elevation-skipped");
       await initialize();
+      startLaunchPreparation();
     })
     .catch((error: unknown) => {
       startupLog.mark("startup-failed", errorMessage(error));
@@ -1792,7 +2128,7 @@ if (singleInstanceLock) {
     });
 
   app.on("window-all-closed", () => {
-    if (gameLauncher.isRunning() || phase === "launching" || phase === "running" || diagnosticWorkInProgress()) {
+    if (keepsLauncherAlive({ gameRunning: gameLauncher.isRunning(), phase, diagnosticWork: diagnosticWorkInProgress() })) {
       quitWhenGameExits = true;
       return;
     }
@@ -1809,5 +2145,6 @@ process.on("uncaughtException", (error) => {
 });
 
 process.on("unhandledRejection", (error) => {
+  startupLog.mark("unhandled-rejection", error instanceof Error ? error.message : String(error));
   void diagnostics?.recordLauncherError("launcher_unhandled_rejection", error).catch(() => undefined);
 });

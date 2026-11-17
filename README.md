@@ -1,6 +1,6 @@
 # ROTK launcher privacy fork
 
-A Windows fork of [ROTK Launcher](https://github.com/MzKaxD/rotk-launcher), tracking upstream version 2.0.49. This is a community project, unaffiliated with Daybreak Game Company or the ROTK team.
+A Windows fork of [ROTK Launcher](https://github.com/MzKaxD/rotk-launcher), tracking upstream version 2.0.51. This is a community project, unaffiliated with Daybreak Game Company or the ROTK team.
 
 ## Privacy and admission
 

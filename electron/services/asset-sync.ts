@@ -13,7 +13,7 @@ import {
   statfs,
   writeFile,
 } from "node:fs/promises";
-import { retryFs } from "./fs-safe.js";
+import { atomicWriteFile, retryFs } from "./fs-safe.js";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -27,12 +27,13 @@ import {
 } from "../constants.js";
 import { assertSafeGeneratedStagingPath } from "./path-policy.js";
 import { extractZipEntry, readZipDirectory } from "./zip-archive.js";
+import { speedLimiter } from "./speed-limit.js";
 
 /**
  * Downloads the custom ROTK asset packs published on the dedicated GitHub
  * repository and installs them into the ROTK client folder. The feed never
  * replaces the bundled launcher patches (steam shim, vivox) and can never
- * deliver executable code: binaries stay in the signed launcher.
+ * deliver executable code: binaries only ship inside the launcher.
  */
 
 export const ASSET_FEED_URL = "https://raw.githubusercontent.com/ROTK-Team/assets/main/feed.json";
@@ -58,6 +59,11 @@ const MAX_TOTAL_ASSET_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_ZIP_ENTRIES = 20_000;
 const MAX_REDIRECTS = 5;
 const MANIFEST_TIMEOUT_MS = 10_000;
+// How long Play waits for the feed when the last manifest it served is on
+// disk. The request itself keeps its full budget and refreshes that copy when
+// it answers late, for the next launch.
+const MANIFEST_FALLBACK_WAIT_MS = 4_000;
+const FEED_CACHE_FILE_NAME = "asset-feed.v1.json";
 const DOWNLOAD_ATTEMPTS = 4;
 // A download that sends nothing for this long is dropped and resumed.
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
@@ -67,7 +73,7 @@ const BACKUP_DIRECTORY_NAME = "asset-backups";
 
 /**
  * The feed distributes data files only. Anything Windows may execute or load
- * as a module keeps being shipped inside the signed launcher instead.
+ * as a module keeps being shipped inside the launcher instead.
  */
 const BLOCKED_EXTENSIONS = new Set([
   "exe", "dll", "sys", "bat", "cmd", "ps1", "msi", "scr", "com", "vbs", "lnk",
@@ -117,6 +123,11 @@ export interface AssetSyncState {
   packVersion: string;
   syncedAt: string;
   assets: InstalledAssetRecord[];
+  /**
+   * The installation this state describes (the id in its install marker).
+   * Absent in states written before this field existed.
+   */
+  installId?: string;
 }
 
 export interface AssetSyncOutcome {
@@ -129,6 +140,17 @@ export interface AssetSyncServiceOptions {
   feedUrl?: string;
   fetchImpl?: typeof fetch;
   onProgress?(progress: AssetSyncProgress): void;
+  /** The feed could not be read in time; a short cause for the launcher log. */
+  onFeedUnavailable?(reason: string): void;
+  /** Overridable for tests only. */
+  feedFallbackWaitMs?: number;
+  /** Bytes per second the pack downloads may use, read as they run; 0 means no limit. */
+  downloadSpeedLimit?(): number;
+}
+
+/** Where the cache and the backups of the installation at `root` are kept: next to it, outside the attested tree. */
+export function assetStorageFor(root: string): string {
+  return join(dirname(root), `.${basename(root)}-assets`);
 }
 
 function manifestError(reason: string): Error {
@@ -304,7 +326,18 @@ function isAssetSyncState(value: unknown): value is AssetSyncState {
       && typeof (asset as InstalledAssetRecord).version === "string"
       && isHex64((asset as InstalledAssetRecord).sha256)
       && Array.isArray((asset as InstalledAssetRecord).installedFiles)
-      && (asset as InstalledAssetRecord).installedFiles.every(isInstalledFileRecord));
+      && (asset as InstalledAssetRecord).installedFiles.every(isInstalledFileRecord))
+    && (state.installId === undefined || typeof state.installId === "string");
+}
+
+/** The id of the installation in `root`, from its install marker; null when it has none. */
+async function readInstallId(root: string): Promise<string | null> {
+  try {
+    const marker = JSON.parse(await readFile(join(root, INSTALL_MARKER_NAME), "utf8")) as { installId?: unknown } | null;
+    return typeof marker?.installId === "string" && marker.installId.length > 0 ? marker.installId : null;
+  } catch {
+    return null;
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -377,6 +410,18 @@ const NETWORK_ERROR_CODES = new Set([
 ]);
 
 /** Network drops, stalls and server-side hiccups are worth another attempt. */
+/** Why the feed was not read, short enough for a log line and free of URLs. */
+function feedFailureReason(error: unknown): string {
+  if (!(error instanceof Error)) return "error";
+  if (error.name === "AbortError" || error.name === "TimeoutError") return "timeout";
+  if (error instanceof SyntaxError) return "invalid-json";
+  if (error.message.startsWith("Manifeste")) return "invalid-manifest";
+  const status = /HTTP (\d{3})/.exec(error.message)?.[1];
+  if (status) return `HTTP ${status}`;
+  const code = (error as NodeJS.ErrnoException).code ?? (error.cause as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{1,64}$/.test(code) ? code : "network";
+}
+
 function isRetryableDownloadError(error: unknown): boolean {
   if (error instanceof DownloadStalledError) return true;
   if (!(error instanceof Error)) return false;
@@ -398,9 +443,15 @@ export class AssetSyncService {
   private readonly legacyBackupDirectory: string;
   private cacheDirectory: string;
   private backupDirectory: string;
+  /** Installation the current pass works on; stamped on the state it writes. */
+  private installId: string | null = null;
   private readonly feedUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly onProgress: (progress: AssetSyncProgress) => void;
+  private readonly feedCachePath: string;
+  private readonly onFeedUnavailable: (reason: string) => void;
+  private readonly feedFallbackWaitMs: number;
+  private readonly downloadSpeedLimit: () => number;
   private lastProgressAt = 0;
 
   constructor(options: AssetSyncServiceOptions) {
@@ -412,6 +463,10 @@ export class AssetSyncService {
     this.feedUrl = options.feedUrl ?? ASSET_FEED_URL;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.onProgress = options.onProgress ?? (() => undefined);
+    this.feedCachePath = join(options.userDataDirectory, FEED_CACHE_FILE_NAME);
+    this.onFeedUnavailable = options.onFeedUnavailable ?? (() => undefined);
+    this.feedFallbackWaitMs = options.feedFallbackWaitMs ?? MANIFEST_FALLBACK_WAIT_MS;
+    this.downloadSpeedLimit = options.downloadSpeedLimit ?? (() => 0);
   }
 
   /**
@@ -419,7 +474,7 @@ export class AssetSyncService {
    * (`D:\Games\.ROTK-assets`), outside the attested tree.
    */
   private useStorageFor(root: string): void {
-    const base = join(dirname(root), `.${basename(root)}-assets`);
+    const base = assetStorageFor(root);
     this.cacheDirectory = join(base, CACHE_DIRECTORY_NAME);
     this.backupDirectory = join(base, BACKUP_DIRECTORY_NAME);
   }
@@ -432,6 +487,22 @@ export class AssetSyncService {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return null;
       throw error;
     }
+  }
+
+  /**
+   * The state, when it describes the installation in `root`. The state file
+   * lives in the user data folder and used to follow the player to any other
+   * installation: after a reinstall elsewhere it listed files that the new
+   * client never received, no original was backed up there because the state
+   * called those files already replaced, and a later restore or a pack leaving
+   * the feed then deleted game files that had no backup. A state stamped with
+   * another installation is ignored, and that installation starts afresh.
+   */
+  private async stateOf(root: string): Promise<AssetSyncState | null> {
+    this.installId = await readInstallId(root);
+    const state = await this.readState();
+    if (state?.installId && this.installId && state.installId !== this.installId) return null;
+    return state;
   }
 
   /**
@@ -448,11 +519,15 @@ export class AssetSyncService {
       throw new Error("Installe d’abord le client ROTK.");
     }
     this.useStorageFor(root);
-    const state = await this.readState();
+    const state = await this.stateOf(root);
 
     let manifest: AssetManifest;
+    // The feed did not answer and the last manifest it served is used instead.
+    let fromCache = false;
     try {
-      manifest = await this.fetchManifest(options.signal);
+      const latest = await this.latestManifest(options.signal, state !== null);
+      manifest = latest.manifest;
+      fromCache = latest.fromCache;
     } catch (error) {
       if (state) return { status: "offline-warning", packVersion: state.packVersion };
       throw error instanceof Error && error.message.startsWith("Manifeste")
@@ -502,15 +577,53 @@ export class AssetSyncService {
       });
     };
 
+    // Without the feed, a pack that is neither in the cache nor downloadable
+    // must not stop the launch: everything is fetched before anything is
+    // installed, so giving up here leaves the client exactly as it was.
+    const fetched = new Set<string>();
+    if (fromCache && state) {
+      for (const asset of pending) {
+        emit("downloading", asset.name, true);
+        try {
+          await this.ensureCachedAsset(asset, options.signal, (amount) => {
+            completedBytes += amount;
+            emit("downloading", asset.name);
+          });
+          fetched.add(asset.name);
+        } catch (error) {
+          if (options.signal?.aborted || !isRetryableDownloadError(error)) throw error;
+          return { status: "offline-warning", packVersion: state.packVersion };
+        }
+      }
+    }
+
     const newRecords: InstalledAssetRecord[] = [...keptRecords];
     for (const asset of pending) {
       emit("downloading", asset.name, true);
       const cachePath = await this.ensureCachedAsset(asset, options.signal, (amount) => {
+        // Already counted when the pack was fetched above.
+        if (fetched.has(asset.name)) return;
         completedBytes += amount;
         emit("downloading", asset.name);
       });
       emit("installing", asset.name, true);
       newRecords.push(await this.installAsset(root, asset, cachePath, ownedFiles));
+      // Recorded pack by pack. The state used to be written once, at the end:
+      // when a later pack failed, the packs already in place were on disk but
+      // not in the state, so the next pass installed them all over again and
+      // the attestation, which reads its expected hashes here, saw files that
+      // did not match. Packs not replaced yet keep their previous record, and
+      // the pack version stays the old one until the whole update is in.
+      // A first sync has no earlier state to keep in step with: it stays
+      // all or nothing, so a half-installed first set is never taken for a
+      // completed one.
+      if (state) {
+        const replaced = new Set(newRecords.map((record) => record.name));
+        await this.writeState({
+          ...state,
+          assets: [...state.assets.filter((record) => !replaced.has(record.name)), ...newRecords],
+        });
+      }
       assetsCompleted += 1;
       emit("installing", asset.name, true);
     }
@@ -550,6 +663,7 @@ export class AssetSyncService {
       }
     }
     await this.pruneCache(manifest);
+    if (fromCache) return { status: "offline-warning", packVersion: manifest.packVersion };
     return { status: changed ? "updated" : "up-to-date", packVersion: manifest.packVersion };
   }
 
@@ -565,7 +679,7 @@ export class AssetSyncService {
   async restore(installRoot: string): Promise<void> {
     const root = resolve(installRoot);
     this.useStorageFor(root);
-    const state = await this.readState();
+    const state = await this.stateOf(root);
     for (const record of state?.assets ?? []) {
       for (const file of record.installedFiles) {
         await this.restoreOrRemove(root, file.path);
@@ -599,6 +713,51 @@ export class AssetSyncService {
     return target;
   }
 
+  /**
+   * The manifest to sync against. With `canFallBack` (a sync completed once),
+   * a feed that is slow, unreachable or broken no longer costs the whole
+   * timeout on every Play nor skips the pass: the last manifest it served is
+   * used, so files can still be checked and repaired from the packs on disk.
+   */
+  private async latestManifest(
+    signal: AbortSignal | undefined,
+    canFallBack: boolean,
+  ): Promise<{ manifest: AssetManifest; fromCache: boolean }> {
+    const request = this.fetchManifest(signal);
+    // Awaited further down, or left to finish on its own: never unhandled.
+    request.catch(() => undefined);
+    const cached = canFallBack ? await this.readCachedManifest() : null;
+    if (!cached) {
+      try {
+        return { manifest: await request, fromCache: false };
+      } catch (error) {
+        this.onFeedUnavailable(feedFailureReason(error));
+        throw error;
+      }
+    }
+    let waited: ReturnType<typeof setTimeout> | undefined;
+    const slow = new Promise<"slow">((resolveSlow) => { waited = setTimeout(() => resolveSlow("slow"), this.feedFallbackWaitMs); });
+    try {
+      const answer = await Promise.race([request, slow]);
+      if (answer !== "slow") return { manifest: answer, fromCache: false };
+      // Left running: a late answer still refreshes the copy on disk.
+      this.onFeedUnavailable("slow");
+    } catch (error) {
+      this.onFeedUnavailable(feedFailureReason(error));
+    } finally {
+      clearTimeout(waited);
+    }
+    return { manifest: cached, fromCache: true };
+  }
+
+  private async readCachedManifest(): Promise<AssetManifest | null> {
+    try {
+      return parseAssetManifest(JSON.parse(stripByteOrderMark(await readFile(this.feedCachePath, "utf8"))));
+    } catch {
+      return null;
+    }
+  }
+
   private async fetchManifest(signal?: AbortSignal): Promise<AssetManifest> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), MANIFEST_TIMEOUT_MS);
@@ -610,7 +769,10 @@ export class AssetSyncService {
       const response = await this.fetchFollowingRedirects(this.feedUrl, controller.signal);
       const body = await response.text();
       if (Buffer.byteLength(body, "utf8") > MAX_FEED_BYTES) throw new Error("Feed too large");
-      return parseAssetManifest(JSON.parse(stripByteOrderMark(body)));
+      const manifest = parseAssetManifest(JSON.parse(stripByteOrderMark(body)));
+      // Only a manifest that passed validation is kept for the next offline pass.
+      await atomicWriteFile(this.feedCachePath, body).catch(() => undefined);
+      return manifest;
     } catch (error) {
       controller.abort();
       throw error;
@@ -757,6 +919,7 @@ export class AssetSyncService {
       });
       await pipeline(
         Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
+        speedLimiter(this.downloadSpeedLimit),
         meter,
         createWriteStream(partialPath, { flags: resumed ? "a" : "w" }),
         { signal: controller.signal },
@@ -864,7 +1027,18 @@ export class AssetSyncService {
     const backupPath = join(this.backupDirectory, relativeToNative(relativePath));
     if (await exists(backupPath) || await exists(join(this.legacyBackupDirectory, relativeToNative(relativePath)))) return;
     await mkdir(dirname(backupPath), { recursive: true });
-    await copyFile(target, backupPath, fsConstants.COPYFILE_EXCL);
+    // Copied under another name, then renamed. A backup is only ever looked
+    // for by its name: one cut short by a crash or a closed launcher (these
+    // are multi-GB packs) used to stay there truncated, was never made again,
+    // and "restore vanilla" later put that broken file back in the game.
+    const temporary = `${backupPath}.rotk-${randomUUID()}.tmp`;
+    try {
+      await copyFile(target, temporary, fsConstants.COPYFILE_EXCL);
+      await retryFs(() => rename(temporary, backupPath));
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /**
@@ -896,7 +1070,8 @@ export class AssetSyncService {
   private async writeState(state: AssetSyncState): Promise<void> {
     await mkdir(dirname(this.statePath), { recursive: true });
     const temporaryPath = `${this.statePath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, {
+    const stamped: AssetSyncState = this.installId ? { ...state, installId: this.installId } : state;
+    await writeFile(temporaryPath, `${JSON.stringify(stamped, null, 2)}\n`, {
       encoding: "utf8",
       flag: "wx",
     });

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { fileHashOrEmpty } from "./file-hash.js";
 import { retryFs } from "./fs-safe.js";
 import { dirname, join } from "node:path";
 import { SUPPORTED_CLIENT_BUILDS } from "./client-build.js";
@@ -127,17 +128,17 @@ if (!GAMEPLAY_CLIENT_BUILD) {
 const STATE_FILE_NAME = "gameplay-patch-state.v1.json";
 
 const UNKNOWN_DINPUT_ERROR =
-  "Un dinput8.dll inconnu est prÃ©sent dans le client ROTK. Supprime-le ou rÃ©importe un client propre.";
+  "Un dinput8.dll inconnu est présent dans le client ROTK. Supprime-le ou réimporte un client propre.";
 const INVALID_BUNDLED_PATCH_ERROR =
-  "Le patch sprint ROTK embarquÃ© est absent ou modifiÃ©. Ton antivirus lâ€™a peut-Ãªtre mis en quarantaine : restaure-le depuis SÃ©curitÃ© Windows ou rÃ©installe le launcher.";
+  "Le patch sprint ROTK embarqué est absent ou modifié. Ton antivirus l’a peut-être mis en quarantaine : restaure-le depuis Sécurité Windows ou réinstalle le launcher.";
 const UNSUPPORTED_CLIENT_ERROR =
-  "Cette version de H1Z1 nâ€™est pas compatible avec le patch sprint ROTK. VÃ©rifie les fichiers du jeu dans Steam puis rÃ©essaie.";
+  "Cette version de H1Z1 n’est pas compatible avec le patch sprint ROTK. Vérifie les fichiers du jeu dans Steam puis réessaie.";
 const INSTALL_PATCH_ERROR =
-  "Le patch sprint ROTK nâ€™a pas pu Ãªtre installÃ©. Ferme H1Z1 puis rÃ©essaie.";
+  "Le patch sprint ROTK n’a pas pu être installé. Ferme H1Z1 puis réessaie.";
 const REMOVE_PATCH_ERROR =
-  "Le patch sprint ROTK nâ€™a pas pu Ãªtre supprimÃ©. Ferme H1Z1 puis rÃ©essaie.";
+  "Le patch sprint ROTK n’a pas pu être supprimé. Ferme H1Z1 puis réessaie.";
 const MARKER_ERROR =
-  "Le marqueur du patch sprint ROTK nâ€™a pas pu Ãªtre Ã©crit. Ferme H1Z1 puis rÃ©essaie.";
+  "Le marqueur du patch sprint ROTK n’a pas pu être écrit. Ferme H1Z1 puis réessaie.";
 export const GAMEPLAY_MARKER_CONTENTS = [
   "mode=anti-slow-v3",
   "patch=1046F98:8f>82,1046FE5:74>eb",
@@ -360,7 +361,7 @@ async function assertBundledPatch(
   if (
     !entry?.isFile()
     || entry.size !== policy.active.bytes
-    || await sha256(bundledPatchPath).catch(() => "") !== policy.active.sha256
+    || await fileHashOrEmpty(bundledPatchPath) !== policy.active.sha256
   ) {
     throw new Error(INVALID_BUNDLED_PATCH_ERROR);
   }
@@ -375,7 +376,7 @@ async function assertSupportedH1Z1(
   if (
     !entry?.isFile()
     || entry.size !== policy.h1z1.bytes
-    || await sha256(executablePath).catch(() => "") !== policy.h1z1.sha256
+    || await fileHashOrEmpty(executablePath) !== policy.h1z1.sha256
   ) {
     throw new Error(UNSUPPORTED_CLIENT_ERROR);
   }
@@ -406,7 +407,7 @@ async function deployGameplayPatchWithPolicy(
     if (
       !staged?.isFile()
       || staged.size !== policy.active.bytes
-      || await sha256(temporaryPath).catch(() => "") !== policy.active.sha256
+      || await fileHashOrEmpty(temporaryPath) !== policy.active.sha256
     ) {
       throw new Error(INSTALL_PATCH_ERROR);
     }
@@ -508,14 +509,6 @@ async function assertGameplayPatchStateWithPolicy(
   }
 }
 
-/** Install or repair the exact two-byte shotgun sprint DirectInput proxy. */
-export async function deployGameplayPatch(
-  root: string,
-  bundledPatchPath: string,
-): Promise<"installed" | "replaced" | "up-to-date"> {
-  return deployGameplayPatchWithPolicy(root, bundledPatchPath, DEFAULT_POLICY);
-}
-
 /**
  * Restore the launcher baseline for the mode the server directed. `clean`
  * removes the marker first and then the DLL; `patched` installs or repairs
@@ -537,13 +530,6 @@ export async function assertGameplayPatchState(
   mode: GameplayPatchMode,
 ): Promise<void> {
   return assertGameplayPatchStateWithPolicy(root, mode, DEFAULT_POLICY);
-}
-
-/** Classify the current installation without mutating it. */
-export async function readGameplayPatchState(
-  root: string,
-): Promise<GameplayPatchInstallState> {
-  return gameplayPatchInstallStateWithPolicy(root, DEFAULT_POLICY);
 }
 
 /**
