@@ -256,7 +256,6 @@ const ENGLISH_ERRORS = new Map<string, string>([
   ["H1Z1 est déjà lancé depuis cette installation.", "H1Z1 is already running from this installation."],
   ["Installe d’abord le client ROTK.", "Install the ROTK client first."],
   ["Windows n’a pas retourné l’identifiant du processus H1Z1.", "Windows did not return an H1Z1 process identifier."],
-  ["Cette version de H1Z1 n’est pas encore prise en charge par ROTK. Vérifie les fichiers du jeu dans Steam puis réessaie.", "This H1Z1 version is not supported by ROTK yet. Verify the game files in Steam and try again."],
   ["Cette version de H1Z1 n’est pas compatible avec le patch crouch ROTK obligatoire. Vérifie les fichiers du jeu dans Steam puis réessaie.", "This H1Z1 version is not compatible with the mandatory ROTK crouch patch. Verify the game files in Steam and try again."],
   ["Cette version de H1Z1 n’est pas compatible avec le patch sprint ROTK. Vérifie les fichiers du jeu dans Steam puis réessaie.", "This H1Z1 version is not compatible with the ROTK sprint patch. Verify the game files in Steam and try again."],
   ["Le patch sprint ROTK embarqué est absent ou modifié. Ton antivirus l’a peut-être mis en quarantaine : restaure-le depuis Sécurité Windows ou réinstalle le launcher.", "The bundled ROTK sprint patch is missing or modified. Your antivirus may have quarantined it: restore it from Windows Security or reinstall the launcher."],
@@ -326,6 +325,7 @@ const DYNAMIC_FRENCH_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string]
 ];
 
 const DYNAMIC_ENGLISH_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
+  [/^Steam a installé une version de H1Z1 que ROTK ne prend pas encore en charge\. .+ Commande : (download_depot [\d ]+)$/, (match) => `Steam installed an H1Z1 version ROTK does not support yet. Open the Steam console (steam://open/console), paste the command at the end of this message, press Enter, wait for “Depot download complete”, then try again. Command: ${match[1]}`],
   [/^H1Z1 s’est fermé pendant son initialisation \(code Windows (.+?)\)\.(?: Windows a bloqué .+)?$/, (match) => `H1Z1 closed during initialization (Windows code ${match[1] === "inconnu" ? "unknown" : match[1]}).${gameExitHint(match[1], "en")}`],
   [/^H1Z1 s’est fermé (\d+) s après son lancement \(code Windows (.+?)\)\.(?: Windows a bloqué .+?)? Si tu ne l’as pas fermé toi-même, relance le jeu ; si ça recommence, Debug \(dans les réglages\) permet d’envoyer un rapport à ROTK\.$/, (match) => `H1Z1 closed ${match[1]} s after it started (Windows code ${match[2] === "inconnu" ? "unknown" : match[2]}).${gameExitHint(match[2], "en")} If you did not close it yourself, start the game again; if it happens again, Debug (in the settings) lets you send a report to ROTK.`],
   [/^Client H1Z1 incomplet : (.+) est introuvable\.$/, (match) => `Incomplete H1Z1 client: ${match[1]} could not be found.`],
@@ -382,7 +382,6 @@ const CHINESE_ERRORS = new Map<string, string>([
   ["Ce dossier n’est pas l’installation ROTK de ce launcher : rien n’a été supprimé.", "此文件夹不是本启动器的 ROTK 安装：未删除任何内容。"],
   ["H1Z1 est déjà lancé depuis cette installation.", "H1Z1 正在运行，请先关闭游戏。"],
   ["Le flux d’assets ROTK est indisponible. Vérifie ta connexion puis réessaie.", "无法连接 ROTK 资源服务器，请检查网络后重试。"],
-  ["Cette version de H1Z1 n’est pas encore prise en charge par ROTK. Vérifie les fichiers du jeu dans Steam puis réessaie.", "ROTK 暂不支持这个版本的 H1Z1。请在 Steam 中验证游戏文件完整性后重试。"],
   ["Installe d’abord le client ROTK.", "请先安装 ROTK 客户端。"],
   ["Le module anticheat ROTK embarqué est absent ou modifié. Ton antivirus l’a peut-être mis en quarantaine : restaure-le depuis Sécurité Windows ou réinstalle le launcher.", "内置的 ROTK 反作弊模块缺失或已被修改。可能被杀毒软件隔离：请在 Windows 安全中心中恢复，或重新安装启动器。"],
   ["Le module anticheat ROTK n’a pas pu être installé dans le client. Ferme H1Z1 puis réessaie.", "无法将 ROTK 反作弊模块安装到客户端。请关闭 H1Z1 后重试。"],
@@ -395,6 +394,7 @@ const CHINESE_ERRORS = new Map<string, string>([
 ]);
 
 const DYNAMIC_CHINESE_ERRORS: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
+  [/^Steam a installé une version de H1Z1 que ROTK ne prend pas encore en charge\. .+ Commande : (download_depot [\d ]+)$/, (match) => `Steam 安装了 ROTK 暂不支持的 H1Z1 版本。请打开 Steam 控制台（steam://open/console），粘贴本消息末尾的命令并回车，等待出现“Depot download complete”后重试。命令：${match[1]}`],
   [/^Espace disque insuffisant : (.+) Go sont nécessaires\.$/, (match) => `磁盘空间不足，需要 ${match[1]} GB。`],
   [/^Le runtime Microsoft Visual C\+\+ x64 nécessaire à ROTK est absent de ce PC \((\S+) introuvable\)\. Installe-le depuis (\S+) puis réessaie\.$/, (match) => `此电脑缺少 ROTK 所需的 Microsoft Visual C++ x64 运行库（找不到 ${match[1]}）。请从 ${match[2]} 安装后重试。`],
   [/^Le runtime Microsoft Visual C\+\+ x64 de ce PC est trop ancien \((\S+) (\S+), minimum (\S+)\) : H1Z1 se fermerait au démarrage\. Installe la dernière version depuis (\S+) puis réessaie\.$/, (match) => `此电脑的 Microsoft Visual C++ x64 运行库版本过旧（${match[1]} ${match[2]}，最低要求 ${match[3]}），H1Z1 会在启动时关闭。请从 ${match[4]} 安装最新版本后重试。`],
